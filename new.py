@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import calendar
+import os
 
 # Set page configuration
 st.set_page_config(
@@ -29,10 +30,20 @@ load_css()
 # Data loading and cleaning
 @st.cache_data
 def load_data():
-    # Load datasets
-    boys_att = pd.read_csv('three_b4_boys.xlsx - Sheet1.csv')
-    girls_att = pd.read_csv('three_b4_girls.xlsx - Sheet1.csv')
-    wmt_scores = pd.read_csv('three_result_combine.xlsx - Worksheet.csv')
+    # Load datasets - using relative paths for Streamlit Cloud
+    try:
+        boys_att = pd.read_csv('three_b4_boys.xlsx - Sheet1.csv')
+        girls_att = pd.read_csv('three_b4_girls.xlsx - Sheet1.csv')
+        wmt_scores = pd.read_csv('three_result_combine.xlsx - Worksheet.csv')
+    except FileNotFoundError:
+        # Try alternative filenames (without spaces or special characters)
+        try:
+            boys_att = pd.read_csv('three_b4_boys.csv')
+            girls_att = pd.read_csv('three_b4_girls.csv')
+            wmt_scores = pd.read_csv('three_result_combine.csv')
+        except FileNotFoundError:
+            st.error("Data files not found. Please make sure the CSV files are in the same directory as the app.")
+            st.stop()
     
     # Add gender column
     boys_att['Gender'] = 'Boy'
