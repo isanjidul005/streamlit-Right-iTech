@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, date
 import calendar
 import io
 
@@ -239,8 +239,20 @@ def main():
     gender_options = ['All'] + list(df['Gender'].unique())
     gender_filter = st.sidebar.selectbox("Select Gender", gender_options)
     
-    min_date = df['Date'].min().date()
-    max_date = df['Date'].max().date()
+    # Handle date range with proper validation
+    try:
+        min_date = df['Date'].min().date()
+        max_date = df['Date'].max().date()
+        
+        # Ensure dates are valid (not NaT)
+        if pd.isna(min_date) or pd.isna(max_date):
+            st.error("Invalid date range detected. Please check your attendance data.")
+            min_date = date.today()
+            max_date = date.today()
+    except:
+        min_date = date.today()
+        max_date = date.today()
+    
     date_range = st.sidebar.date_input("Select Date Range", [min_date, max_date])
     
     # Filter data based on global filters
@@ -257,15 +269,25 @@ def main():
         
         # WMT selector
         wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name']])
+        if not wmt_options:
+            st.error("No WMT columns found in the score data.")
+            st.stop()
+            
         selected_wmt = st.selectbox("Select WMT", wmt_options)
         
         # Calculate metrics
-        avg_score = filtered_df[filtered_df['WMT'] == selected_wmt]['Score'].mean()
-        pass_rate = (filtered_df[(filtered_df['WMT'] == selected_wmt) & 
-                               (filtered_df['Score'] >= 50)]['Score'].count() / 
-                    filtered_df[filtered_df['WMT'] == selected_wmt]['Score'].count()) * 100
+        wmt_data = filtered_df[filtered_df['WMT'] == selected_wmt]
+        if len(wmt_data) == 0:
+            st.warning(f"No data available for {selected_wmt}")
+            avg_score = 0
+            pass_rate = 0
+        else:
+            avg_score = wmt_data['Score'].mean()
+            pass_count = wmt_data[wmt_data['Score'] >= 50]['Score'].count()
+            pass_rate = (pass_count / len(wmt_data)) * 100 if len(wmt_data) > 0 else 0
+        
         attendance_rate = (filtered_df[filtered_df['Status'] == 'Present'].shape[0] / 
-                          filtered_df.shape[0]) * 100
+                          filtered_df.shape[0]) * 100 if filtered_df.shape[0] > 0 else 0
         
         # Display metrics
         col1, col2, col3 = st.columns(3)
@@ -275,59 +297,69 @@ def main():
         
         # Score distribution
         st.subheader("Score Distribution")
-        fig_hist = px.histogram(filtered_df[filtered_df['WMT'] == selected_wmt], 
-                               x="Score", nbins=20, title=f"Score Distribution for {selected_wmt}")
-        st.plotly_chart(fig_hist, use_container_width=True)
+        if len(wmt_data) > 0:
+            fig_hist = px.histogram(wmt_data, x="Score", nbins=20, title=f"Score Distribution for {selected_wmt}")
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.info("No score data available for the selected WMT")
         
         # Top and bottom performers
         st.subheader("Top and Bottom Performers")
-        scores_wmt = filtered_df[filtered_df['WMT'] == selected_wmt]
-        top_10 = scores_wmt.nlargest(10, 'Score')
-        bottom_10 = scores_wmt.nsmallest(10, 'Score')
-        
-        fig_top = px.bar(top_10, x='Name', y='Score', title="Top 10 Performers")
-        fig_bottom = px.bar(bottom_10, x='Name', y='Score', title="Bottom 10 Performers")
-        
-        col1, col2 = st.columns(2)
-        col1.plotly_chart(fig_top, use_container_width=True)
-        col2.plotly_chart(fig_bottom, use_container_width=True)
+        if len(wmt_data) > 0:
+            top_10 = wmt_data.nlargest(min(10, len(wmt_data)), 'Score')
+            bottom_10 = wmt_data.nsmallest(min(10, len(wmt_data)), 'Score')
+            
+            fig_top = px.bar(top_10, x='Name', y='Score', title="Top Performers")
+            fig_bottom = px.bar(bottom_10, x='Name', y='Score', title="Bottom Performers")
+            
+            col1, col2 = st.columns(2)
+            col1.plotly_chart(fig_top, use_container_width=True)
+            col2.plotly_chart(fig_bottom, use_container_width=True)
+        else:
+            st.info("No score data available for performance comparison")
         
         # Attendance over time
         st.subheader("Attendance Rate Over Time")
-        daily_attendance = filtered_df.groupby('Date')['Status'].apply(
-            lambda x: (x == 'Present').sum() / x.count() * 100
-        ).reset_index(name='Attendance Rate')
-        
-        fig_att = px.line(daily_attendance, x='Date', y='Attendance Rate', 
-                         title="Daily Attendance Rate")
-        st.plotly_chart(fig_att, use_container_width=True)
+        if len(filtered_df) > 0:
+            daily_attendance = filtered_df.groupby('Date')['Status'].apply(
+                lambda x: (x == 'Present').sum() / x.count() * 100 if x.count() > 0 else 0
+            ).reset_index(name='Attendance Rate')
+            
+            fig_att = px.line(daily_attendance, x='Date', y='Attendance Rate', 
+                             title="Daily Attendance Rate")
+            st.plotly_chart(fig_att, use_container_width=True)
+        else:
+            st.info("No attendance data available")
         
         # Early intervention flagging
         st.subheader("Students Needing Attention")
-        student_stats = filtered_df.groupby(['Name', 'WMT']).agg({
-            'Score': 'mean',
-            'Status': lambda x: (x == 'Present').mean() * 100
-        }).reset_index()
-        
-        # Identify students with declining scores
-        declining_students = []
-        for name in student_stats['Name'].unique():
-            student_data = student_stats[student_stats['Name'] == name].sort_values('WMT')
-            if len(student_data) > 2 and student_data['Score'].is_monotonic_decreasing:
-                declining_students.append(name)
-        
-        # Identify low attendance
-        low_attendance = student_stats[student_stats['Status'] < 75]['Name'].unique()
-        
-        if len(declining_students) > 0:
-            st.write("**Students with declining scores:**", ", ".join(declining_students[:5]))
-        else:
-            st.write("No students with declining scores found.")
+        if len(filtered_df) > 0:
+            student_stats = filtered_df.groupby(['Name', 'WMT']).agg({
+                'Score': 'mean',
+                'Status': lambda x: (x == 'Present').mean() * 100
+            }).reset_index()
             
-        if len(low_attendance) > 0:
-            st.write("**Students with low attendance:**", ", ".join(low_attendance[:5]))
+            # Identify students with declining scores
+            declining_students = []
+            for name in student_stats['Name'].unique():
+                student_data = student_stats[student_stats['Name'] == name].sort_values('WMT')
+                if len(student_data) > 2 and student_data['Score'].is_monotonic_decreasing:
+                    declining_students.append(name)
+            
+            # Identify low attendance
+            low_attendance = student_stats[student_stats['Status'] < 75]['Name'].unique()
+            
+            if len(declining_students) > 0:
+                st.write("**Students with declining scores:**", ", ".join(declining_students[:5]))
+            else:
+                st.write("No students with declining scores found.")
+                
+            if len(low_attendance) > 0:
+                st.write("**Students with low attendance:**", ", ".join(low_attendance[:5]))
+            else:
+                st.write("No students with low attendance found.")
         else:
-            st.write("No students with low attendance found.")
+            st.info("No data available for student analysis")
     
     # Section 2: Student Comparison Dashboard
     elif section == "Student Comparison":
@@ -335,6 +367,10 @@ def main():
         
         # Student selection
         student_list = sorted(filtered_df['Name'].unique())
+        if len(student_list) == 0:
+            st.error("No students found in the filtered data")
+            st.stop()
+            
         col1, col2 = st.columns(2)
         student1 = col1.selectbox("Select Student 1", student_list)
         student2 = col2.selectbox("Select Student 2", student_list)
@@ -345,53 +381,70 @@ def main():
         
         # Score trend comparison
         st.subheader("Score Trend Comparison")
-        fig_trend = go.Figure()
-        fig_trend.add_trace(go.Scatter(
-            x=student1_data['WMT'].unique(), 
-            y=student1_data.groupby('WMT')['Score'].mean(),
-            name=student1
-        ))
-        fig_trend.add_trace(go.Scatter(
-            x=student2_data['WMT'].unique(), 
-            y=student2_data.groupby('WMT')['Score'].mean(),
-            name=student2
-        ))
-        st.plotly_chart(fig_trend, use_container_width=True)
+        if len(student1_data) > 0 or len(student2_data) > 0:
+            fig_trend = go.Figure()
+            
+            if len(student1_data) > 0:
+                student1_scores = student1_data.groupby('WMT')['Score'].mean().reset_index()
+                fig_trend.add_trace(go.Scatter(
+                    x=student1_scores['WMT'], 
+                    y=student1_scores['Score'],
+                    name=student1
+                ))
+            
+            if len(student2_data) > 0:
+                student2_scores = student2_data.groupby('WMT')['Score'].mean().reset_index()
+                fig_trend.add_trace(go.Scatter(
+                    x=student2_scores['WMT'], 
+                    y=student2_scores['Score'],
+                    name=student2
+                ))
+            
+            st.plotly_chart(fig_trend, use_container_width=True)
+        else:
+            st.info("No score data available for comparison")
         
         # Attendance vs Score scatter plot
         st.subheader("Attendance vs Performance")
-        scatter_data = filtered_df.groupby('Name').agg({
-            'Score': 'mean',
-            'Status': lambda x: (x == 'Present').mean() * 100
-        }).reset_index()
-        
-        fig_scatter = px.scatter(scatter_data, x='Status', y='Score', hover_data=['Name'])
-        # Highlight selected students
-        fig_scatter.add_trace(go.Scatter(
-            x=scatter_data[scatter_data['Name'] == student1]['Status'],
-            y=scatter_data[scatter_data['Name'] == student1]['Score'],
-            mode='markers', marker=dict(size=15, color='red'), name=student1
-        ))
-        fig_scatter.add_trace(go.Scatter(
-            x=scatter_data[scatter_data['Name'] == student2]['Status'],
-            y=scatter_data[scatter_data['Name'] == student2]['Score'],
-            mode='markers', marker=dict(size=15, color='blue'), name=student2
-        ))
-        st.plotly_chart(ffig_scatter, use_container_width=True)
+        if len(filtered_df) > 0:
+            scatter_data = filtered_df.groupby('Name').agg({
+                'Score': 'mean',
+                'Status': lambda x: (x == 'Present').mean() * 100
+            }).reset_index()
+            
+            fig_scatter = px.scatter(scatter_data, x='Status', y='Score', hover_data=['Name'])
+            # Highlight selected students
+            if student1 in scatter_data['Name'].values:
+                fig_scatter.add_trace(go.Scatter(
+                    x=scatter_data[scatter_data['Name'] == student1]['Status'],
+                    y=scatter_data[scatter_data['Name'] == student1]['Score'],
+                    mode='markers', marker=dict(size=15, color='red'), name=student1
+                ))
+            
+            if student2 in scatter_data['Name'].values:
+                fig_scatter.add_trace(go.Scatter(
+                    x=scatter_data[scatter_data['Name'] == student2]['Status'],
+                    y=scatter_data[scatter_data['Name'] == student2]['Score'],
+                    mode='markers', marker=dict(size=15, color='blue'), name=student2
+                ))
+            
+            st.plotly_chart(fig_scatter, use_container_width=True)
+        else:
+            st.info("No data available for scatter plot")
         
         # Performance table
         st.subheader("Performance Comparison")
         comparison_data = {
             'Metric': ['Average Score', 'Median Score', 'Attendance Rate'],
             student1: [
-                student1_data['Score'].mean(),
-                student1_data['Score'].median(),
-                (student1_data['Status'] == 'Present').mean() * 100
+                student1_data['Score'].mean() if len(student1_data) > 0 else 0,
+                student1_data['Score'].median() if len(student1_data) > 0 else 0,
+                (student1_data['Status'] == 'Present').mean() * 100 if len(student1_data) > 0 else 0
             ],
             student2: [
-                student2_data['Score'].mean(),
-                student2_data['Score'].median(),
-                (student2_data['Status'] == 'Present').mean() * 100
+                student2_data['Score'].mean() if len(student2_data) > 0 else 0,
+                student2_data['Score'].median() if len(student2_data) > 0 else 0,
+                (student2_data['Status'] == 'Present').mean() * 100 if len(student2_data) > 0 else 0
             ]
         }
         st.table(pd.DataFrame(comparison_data))
@@ -402,10 +455,18 @@ def main():
         
         # Student selection
         student_list = sorted(filtered_df['Name'].unique())
+        if len(student_list) == 0:
+            st.error("No students found in the filtered data")
+            st.stop()
+            
         selected_student = st.selectbox("Select Student", student_list)
         
         # Filter data for selected student
         student_data = filtered_df[filtered_df['Name'] == selected_student]
+        
+        if len(student_data) == 0:
+            st.warning(f"No data available for {selected_student}")
+            st.stop()
         
         # Calculate metrics
         avg_score = student_data['Score'].mean()
@@ -421,8 +482,11 @@ def main():
         # Score trend
         st.subheader("Score Trend Over Time")
         score_trend = student_data.groupby('WMT')['Score'].mean().reset_index()
-        fig_score = px.line(score_trend, x='WMT', y='Score', title="WMT Score Trend")
-        st.plotly_chart(fig_score, use_container_width=True)
+        if len(score_trend) > 0:
+            fig_score = px.line(score_trend, x='WMT', y='Score', title="WMT Score Trend")
+            st.plotly_chart(fig_score, use_container_width=True)
+        else:
+            st.info("No score trend data available")
         
         # Attendance heatmap
         st.subheader("Attendance Heatmap")
@@ -432,19 +496,26 @@ def main():
         student_att['Year'] = student_att['Date'].dt.year
         student_att['Status_num'] = student_att['Status'].map({'Present': 1, 'Absent': 0})
         
-        heatmap_data = student_att.pivot_table(
-            values='Status_num', index='Day', columns='Month', aggfunc='mean'
-        )
-        fig_heatmap = px.imshow(heatmap_data, title="Monthly Attendance Pattern")
-        st.plotly_chart(fig_heatmap, use_container_width=True)
+        if len(student_att) > 0:
+            heatmap_data = student_att.pivot_table(
+                values='Status_num', index='Day', columns='Month', aggfunc='mean'
+            )
+            fig_heatmap = px.imshow(heatmap_data, title="Monthly Attendance Pattern")
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+        else:
+            st.info("No attendance data available for heatmap")
         
         # Subject-wise performance
         st.subheader("Subject-wise Performance")
         subject_data = student_data.copy()
         subject_data['Subject'] = subject_data['WMT'].str.split('_').str[0]
         subject_avg = subject_data.groupby('Subject')['Score'].mean().reset_index()
-        fig_subject = px.bar(subject_avg, x='Subject', y='Score', title="Average Score by Subject")
-        st.plotly_chart(fig_subject, use_container_width=True)
+        
+        if len(subject_avg) > 0:
+            fig_subject = px.bar(subject_avg, x='Subject', y='Score', title="Average Score by Subject")
+            st.plotly_chart(fig_subject, use_container_width=True)
+        else:
+            st.info("No subject-wise data available")
 
 if __name__ == "__main__":
     main()
