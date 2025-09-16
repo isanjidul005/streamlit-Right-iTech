@@ -42,6 +42,15 @@ def read_data_file(file):
         st.error(f"Error reading file {file.name}: {str(e)}")
         return None
 
+# Function to find column names by pattern
+def find_column_by_pattern(df, patterns):
+    """Find column names that match given patterns"""
+    for pattern in patterns:
+        for col in df.columns:
+            if pattern.lower() in col.lower():
+                return col
+    return None
+
 # File upload and data processing
 @st.cache_data
 def process_uploaded_files(attendance_files, score_file):
@@ -53,6 +62,20 @@ def process_uploaded_files(attendance_files, score_file):
         if df is None:
             continue
             
+        # Standardize column names
+        id_col = find_column_by_pattern(df, ['id', 'student id', 'roll no', 'roll number'])
+        name_col = find_column_by_pattern(df, ['name', 'student name', 'student'])
+        
+        if id_col and name_col:
+            df = df.rename(columns={id_col: 'ID', name_col: 'Name'})
+        else:
+            st.warning(f"Could not find ID/Name columns in {file.name}. Using first two columns.")
+            if len(df.columns) >= 2:
+                df = df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Name'})
+            else:
+                st.error(f"File {file.name} doesn't have enough columns")
+                continue
+            
         # Try to detect gender from filename or add unknown
         file_name = file.name.lower()
         if 'boy' in file_name or 'male' in file_name:
@@ -61,6 +84,7 @@ def process_uploaded_files(attendance_files, score_file):
             df['Gender'] = 'Girl'
         else:
             df['Gender'] = 'Unknown'
+            
         attendance_dfs.append(df)
     
     if not attendance_dfs:
@@ -71,23 +95,23 @@ def process_uploaded_files(attendance_files, score_file):
     attendance = pd.concat(attendance_dfs, ignore_index=True)
     
     # Clean attendance data - identify date columns
-    non_date_columns = ['ID', 'Name', 'Gender', 'Student ID', 'Student Name']
-    date_columns = [col for col in attendance.columns if col not in non_date_columns and pd.to_datetime(col, errors='coerce') is not pd.NaT]
+    non_date_columns = ['ID', 'Name', 'Gender']
+    date_columns = []
     
-    # If no date columns found automatically, try to identify them
-    if not date_columns:
-        # Try to find columns that look like dates
-        for col in attendance.columns:
-            if col not in non_date_columns:
-                try:
-                    # Sample first few non-null values to check if they look like dates
-                    sample_values = attendance[col].dropna().head(5)
-                    if any('present' in str(val).lower() or 'absent' in str(val).lower() or 
-                           '✔' in str(val) or '✘' in str(val) or 
-                           'p' in str(val).lower() or 'a' in str(val).lower() for val in sample_values):
-                        date_columns.append(col)
-                except:
-                    continue
+    # Try to identify date columns
+    for col in attendance.columns:
+        if col not in non_date_columns:
+            try:
+                # Check if column name can be parsed as date
+                pd.to_datetime(col, errors='coerce')
+                date_columns.append(col)
+            except:
+                # Check if column contains date-like data
+                sample = attendance[col].dropna().head(5)
+                if any('present' in str(val).lower() or 'absent' in str(val).lower() or 
+                       '✔' in str(val) or '✘' in str(val) or 
+                       'p' in str(val).lower() or 'a' in str(val).lower() for val in sample):
+                    date_columns.append(col)
     
     if not date_columns:
         st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
@@ -114,12 +138,25 @@ def process_uploaded_files(attendance_files, score_file):
     if score_df is None:
         return None, None, None
     
+    # Standardize score column names
+    id_col = find_column_by_pattern(score_df, ['id', 'student id', 'roll no', 'roll number'])
+    name_col = find_column_by_pattern(score_df, ['name', 'student name', 'student'])
+    
+    if id_col and name_col:
+        score_df = score_df.rename(columns={id_col: 'ID', name_col: 'Name'})
+    else:
+        st.warning(f"Could not find ID/Name columns in score file. Using first two columns.")
+        if len(score_df.columns) >= 2:
+            score_df = score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[1]: 'Name'})
+        else:
+            st.error("Score file doesn't have enough columns")
+            return None, None, None
+    
     # Clean score data
-    score_df = score_df.replace(['Ab', 'AB', 'ab', 'Absent', 'N/A', '', 'NaN', 'NA'], 0)
+    score_df = score_df.replace(['Ab', 'AB', 'ab', 'Absent', 'N/A', '', 'NaN', 'NA', '-'], 0)
     
     # Identify score columns (non-ID and non-Name columns)
-    score_id_columns = ['ID', 'Name', 'Student ID', 'Student Name']
-    score_columns = [col for col in score_df.columns if col not in score_id_columns]
+    score_columns = [col for col in score_df.columns if col not in ['ID', 'Name']]
     
     for col in score_columns:
         score_df[col] = pd.to_numeric(score_df[col], errors='coerce').fillna(0)
@@ -219,7 +256,7 @@ def main():
         st.header("Class Overview Dashboard")
         
         # WMT selector
-        wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name', 'Student ID', 'Student Name']])
+        wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name']])
         selected_wmt = st.selectbox("Select WMT", wmt_options)
         
         # Calculate metrics
@@ -340,7 +377,7 @@ def main():
             y=scatter_data[scatter_data['Name'] == student2]['Score'],
             mode='markers', marker=dict(size=15, color='blue'), name=student2
         ))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(ffig_scatter, use_container_width=True)
         
         # Performance table
         st.subheader("Performance Comparison")
