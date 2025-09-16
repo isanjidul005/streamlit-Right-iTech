@@ -27,6 +27,21 @@ def load_css():
 
 load_css()
 
+# Function to read both CSV and Excel files
+def read_data_file(file):
+    """Read CSV or Excel files and return DataFrame"""
+    try:
+        if file.name.endswith('.csv'):
+            return pd.read_csv(file)
+        elif file.name.endswith(('.xlsx', '.xls')):
+            return pd.read_excel(file)
+        else:
+            st.error(f"Unsupported file format: {file.name}")
+            return None
+    except Exception as e:
+        st.error(f"Error reading file {file.name}: {str(e)}")
+        return None
+
 # File upload and data processing
 @st.cache_data
 def process_uploaded_files(attendance_files, score_file):
@@ -34,24 +49,54 @@ def process_uploaded_files(attendance_files, score_file):
     attendance_dfs = []
     
     for file in attendance_files:
-        df = pd.read_csv(file)
+        df = read_data_file(file)
+        if df is None:
+            continue
+            
         # Try to detect gender from filename or add unknown
-        if 'boy' in file.name.lower() or 'male' in file.name.lower():
+        file_name = file.name.lower()
+        if 'boy' in file_name or 'male' in file_name:
             df['Gender'] = 'Boy'
-        elif 'girl' in file.name.lower() or 'female' in file.name.lower():
+        elif 'girl' in file_name or 'female' in file_name:
             df['Gender'] = 'Girl'
         else:
             df['Gender'] = 'Unknown'
         attendance_dfs.append(df)
     
+    if not attendance_dfs:
+        st.error("No valid attendance files were processed")
+        return None, None, None
+    
     # Combine all attendance data
     attendance = pd.concat(attendance_dfs, ignore_index=True)
     
-    # Clean attendance data
-    date_columns = [col for col in attendance.columns if col not in ['ID', 'Name', 'Gender']]
+    # Clean attendance data - identify date columns
+    non_date_columns = ['ID', 'Name', 'Gender', 'Student ID', 'Student Name']
+    date_columns = [col for col in attendance.columns if col not in non_date_columns and pd.to_datetime(col, errors='coerce') is not pd.NaT]
+    
+    # If no date columns found automatically, try to identify them
+    if not date_columns:
+        # Try to find columns that look like dates
+        for col in attendance.columns:
+            if col not in non_date_columns:
+                try:
+                    # Sample first few non-null values to check if they look like dates
+                    sample_values = attendance[col].dropna().head(5)
+                    if any('present' in str(val).lower() or 'absent' in str(val).lower() or 
+                           '✔' in str(val) or '✘' in str(val) or 
+                           'p' in str(val).lower() or 'a' in str(val).lower() for val in sample_values):
+                        date_columns.append(col)
+                except:
+                    continue
+    
+    if not date_columns:
+        st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
+        return None, None, None
+    
     attendance[date_columns] = attendance[date_columns].replace({
-        '✔': 'Present', '✓': 'Present', 'P': 'Present', 'Present': 'Present',
-        '✘': 'Absent', 'X': 'Absent', 'A': 'Absent', 'Absent': 'Absent'
+        '✔': 'Present', '✓': 'Present', 'P': 'Present', 'Present': 'Present', 'present': 'Present',
+        '✘': 'Absent', 'X': 'Absent', 'A': 'Absent', 'Absent': 'Absent', 'absent': 'Absent',
+        '1': 'Present', '0': 'Absent', 1: 'Present', 0: 'Absent'
     })
     
     # Melt attendance data to long format
@@ -65,16 +110,22 @@ def process_uploaded_files(attendance_files, score_file):
     attendance_long = attendance_long.dropna(subset=['Date'])
     
     # Process score file
-    wmt_scores = pd.read_csv(score_file)
+    score_df = read_data_file(score_file)
+    if score_df is None:
+        return None, None, None
     
     # Clean score data
-    wmt_scores = wmt_scores.replace(['Ab', 'AB', 'ab', 'Absent', 'N/A', ''], 0)
-    score_columns = [col for col in wmt_scores.columns if col not in ['ID', 'Name']]
+    score_df = score_df.replace(['Ab', 'AB', 'ab', 'Absent', 'N/A', '', 'NaN', 'NA'], 0)
+    
+    # Identify score columns (non-ID and non-Name columns)
+    score_id_columns = ['ID', 'Name', 'Student ID', 'Student Name']
+    score_columns = [col for col in score_df.columns if col not in score_id_columns]
+    
     for col in score_columns:
-        wmt_scores[col] = pd.to_numeric(wmt_scores[col], errors='coerce').fillna(0)
+        score_df[col] = pd.to_numeric(score_df[col], errors='coerce').fillna(0)
     
     # Melt score data to long format
-    wmt_long = wmt_scores.melt(
+    wmt_long = score_df.melt(
         id_vars=['ID', 'Name'], 
         value_vars=score_columns, 
         var_name='WMT', 
@@ -83,7 +134,7 @@ def process_uploaded_files(attendance_files, score_file):
     
     # Merge data
     merged_df = pd.merge(wmt_long, attendance_long, on=['ID', 'Name'])
-    return merged_df, wmt_scores, attendance_long
+    return merged_df, score_df, attendance_long
 
 # Main app
 def main():
@@ -94,30 +145,53 @@ def main():
     
     # Upload attendance files
     attendance_files = st.sidebar.file_uploader(
-        "Upload Attendance CSV Files",
-        type=['csv'],
+        "Upload Attendance Files",
+        type=['csv', 'xlsx', 'xls'],
         accept_multiple_files=True,
-        help="Upload one or more attendance CSV files"
+        help="Upload one or more attendance files (CSV or Excel)"
     )
     
     # Upload score file
     score_file = st.sidebar.file_uploader(
-        "Upload WMT Scores CSV File",
-        type=['csv'],
-        help="Upload the WMT scores CSV file"
+        "Upload WMT Scores File",
+        type=['csv', 'xlsx', 'xls'],
+        help="Upload the WMT scores file (CSV or Excel)"
     )
     
     # Check if files are uploaded
-    if not attendance_files or not score_file:
-        st.info("👆 Please upload both attendance and score files to begin")
+    if not attendance_files:
+        st.info("👆 Please upload attendance files to begin")
+        st.stop()
+    
+    if not score_file:
+        st.info("👆 Please upload WMT scores file to begin")
         st.stop()
     
     # Process files
-    try:
-        df, wmt_scores, attendance_long = process_uploaded_files(attendance_files, score_file)
-    except Exception as e:
-        st.error(f"Error processing files: {str(e)}")
-        st.stop()
+    with st.spinner("Processing your files..."):
+        try:
+            df, wmt_scores, attendance_long = process_uploaded_files(attendance_files, score_file)
+            
+            if df is None:
+                st.error("Failed to process files. Please check your file formats.")
+                st.stop()
+                
+        except Exception as e:
+            st.error(f"Error processing files: {str(e)}")
+            st.stop()
+    
+    # Show success message
+    st.success(f"✅ Successfully processed {len(attendance_files)} attendance files and 1 score file")
+    
+    # Display data preview
+    with st.expander("View Raw Data Preview"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Attendance Data Preview:**")
+            st.dataframe(attendance_long.head())
+        with col2:
+            st.write("**Score Data Preview:**")
+            st.dataframe(wmt_scores.head())
     
     # Sidebar configuration
     st.sidebar.header("Dashboard Controls")
@@ -145,7 +219,7 @@ def main():
         st.header("Class Overview Dashboard")
         
         # WMT selector
-        wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name']])
+        wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name', 'Student ID', 'Student Name']])
         selected_wmt = st.selectbox("Select WMT", wmt_options)
         
         # Calculate metrics
