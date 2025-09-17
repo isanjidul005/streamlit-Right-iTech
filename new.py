@@ -1,197 +1,209 @@
+# new.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
+import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 st.set_page_config(page_title="Class Dashboard", layout="wide")
 
-st.title("📊 World-Class Student Dashboard")
-st.markdown("Upload your attendance and marks data to get started.")
-
-# ================= FILE UPLOAD =====================
-att_file = st.file_uploader("Upload Attendance CSV", type="csv")
-marks_file = st.file_uploader("Upload Marks CSV", type="csv")
+# ------------------------
+# FILE UPLOAD SECTION
+# ------------------------
+st.sidebar.header("Upload Data Files")
+att_file = st.sidebar.file_uploader("Upload Attendance CSV", type="csv")
+marks_file = st.sidebar.file_uploader("Upload Marks CSV", type="csv")
 
 if att_file and marks_file:
     attendance = pd.read_csv(att_file)
     marks = pd.read_csv(marks_file)
 
-    # ================= DATA PROCESSING =====================
-    # Attendance summary
+    # ------------------------
+    # DATA PREP
+    # ------------------------
     att_summary = (
-        attendance.groupby(["ID", "Name"])
-        .agg(Present=("Status", lambda x: (x == "Present").sum()),
-             Total=("Status", "count"))
-        .reset_index()
+        attendance.groupby(["ID", "Name"])["Status"]
+        .apply(lambda x: (x == "Present").mean() * 100)
+        .reset_index(name="AttendanceRate")
     )
-    att_summary["AttendanceRate"] = (att_summary["Present"] / att_summary["Total"]) * 100
 
-    # Marks summary
     marks_summary = (
         marks.groupby(["ID", "Name"])
-        .agg(AverageScore=("Marks", "mean"))
-        .reset_index()
+        .apply(lambda df: df.loc[~df["WasAbsent"], "Marks"].mean())
+        .reset_index(name="AvgScore")
     )
 
-    # --- Ensure consistent merge keys ---
-    att_summary["ID"] = att_summary["ID"].astype(str)
-    marks_summary["ID"] = marks_summary["ID"].astype(str)
-    att_summary["Name"] = att_summary["Name"].astype(str).str.strip()
-    marks_summary["Name"] = marks_summary["Name"].astype(str).str.strip()
+    students = pd.merge(att_summary, marks_summary, on=["ID", "Name"], how="outer")
 
-    # --- Merge datasets ---
-    if set(["ID", "Name"]).issubset(marks_summary.columns):
-        students = pd.merge(att_summary, marks_summary, on=["ID", "Name"], how="left")
-    else:
-        students = pd.merge(att_summary, marks_summary, on="Name", how="left")
+    # ------------------------
+    # TABS
+    # ------------------------
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📊 Class Overview", "👤 Student Profile", "⚖️ Student Comparison", "🔍 Trends & Clusters"]
+    )
 
-    # ================= TABS =====================
-    tabs = st.tabs([
-        "📈 Class Overview",
-        "👤 Student Profile",
-        "⚖️ Student Comparison",
-        "🔍 Clustering Insights"
-    ])
+    # ========================
+    # TAB 1: CLASS OVERVIEW
+    # ========================
+    with tab1:
+        st.subheader("Class Overview")
+        st.write("Overall class performance and attendance insights.")
 
-    # -------- CLASS OVERVIEW TAB --------
-    with tabs[0]:
-        st.header("📈 Class Overview")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Attendance Distribution")
-            fig, ax = plt.subplots()
-            sns.histplot(students["AttendanceRate"], bins=10, kde=True, ax=ax)
-            st.pyplot(fig)
-
-            with st.expander("ℹ️ What this means"):
-                st.write("""
-                This chart shows how often students attend class.  
-                - **Left side = low attendance**  
-                - **Right side = high attendance**  
-                Peaks show where most students fall.  
-                """)
-
-        with col2:
-            st.subheader("Performance Distribution")
-            fig, ax = plt.subplots()
-            sns.histplot(students["AverageScore"], bins=10, kde=True, ax=ax)
-            st.pyplot(fig)
-
-            with st.expander("ℹ️ What this means"):
-                st.write("""
-                This shows how exam scores are spread across the class.  
-                The higher the peak, the more students fall into that score range.  
-                """)
-
-        st.subheader("Attendance vs Performance")
-        fig, ax = plt.subplots()
-        sns.scatterplot(
-            data=students,
+        # Scatter: Attendance vs Performance
+        fig_scatter = px.scatter(
+            students,
             x="AttendanceRate",
-            y="AverageScore",
-            hue="AverageScore",
-            palette="viridis",
-            ax=ax
+            y="AvgScore",
+            text="Name",
+            trendline="ols",
+            labels={"AttendanceRate": "Attendance (%)", "AvgScore": "Average Score"},
+            title="Attendance vs Performance",
         )
-        st.pyplot(fig)
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
-        with st.expander("ℹ️ What this means"):
-            st.write("""
-            Each point = one student.  
-            - **X-axis:** Attendance %  
-            - **Y-axis:** Average Score  
-            A rising trend suggests that better attendance = better marks.  
-            """)
+        if st.checkbox("Show Explanation (Attendance vs Performance)"):
+            st.info(
+                "This scatter plot shows how attendance rate relates to performance. "
+                "The regression line indicates whether consistent attendance improves scores. "
+                "Outliers highlight students who may need extra support."
+            )
 
-    # -------- STUDENT PROFILE TAB --------
-    with tabs[1]:
-        st.header("👤 Student Profile")
+        # Subject Average
+        subject_avg = (
+            marks.loc[~marks["WasAbsent"]].groupby("Subject")["Marks"].mean().reset_index()
+        )
+        fig_subject = px.bar(
+            subject_avg,
+            x="Subject",
+            y="Marks",
+            title="Average Marks by Subject",
+            color="Marks",
+            text_auto=True,
+        )
+        st.plotly_chart(fig_subject, use_container_width=True)
 
-        selected_student = st.selectbox("Select Student", students["Name"].unique())
-        student_data = students[students["Name"] == selected_student]
+    # ========================
+    # TAB 2: STUDENT PROFILE
+    # ========================
+    with tab2:
+        st.subheader("Student Profile")
+        student = st.selectbox("Select Student", students["Name"].unique())
 
-        if not student_data.empty:
-            st.metric("Attendance Rate (%)", round(student_data["AttendanceRate"].iloc[0], 2))
-            st.metric("Average Score", round(student_data["AverageScore"].iloc[0], 2))
-
-            st.subheader("📅 Subject-wise Performance")
-            subj_perf = marks[marks["Name"] == selected_student]
-
-            fig, ax = plt.subplots()
-            sns.barplot(data=subj_perf, x="Subject", y="Marks", ax=ax)
-            ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-            st.pyplot(fig)
-
-            with st.expander("ℹ️ What this means"):
-                st.write("""
-                This shows how the student performs in each subject.  
-                You can quickly see their strengths and weaknesses.  
-                """)
-
-    # -------- STUDENT COMPARISON TAB --------
-    with tabs[2]:
-        st.header("⚖️ Compare Two Students")
+        stu_att = att_summary.loc[att_summary["Name"] == student, "AttendanceRate"].values[0]
+        stu_marks = marks.loc[(marks["Name"] == student) & (~marks["WasAbsent"])]
 
         col1, col2 = st.columns(2)
-        student1 = col1.selectbox("Select Student 1", students["Name"].unique())
-        student2 = col2.selectbox("Select Student 2", students["Name"].unique())
+        col1.metric("Attendance Rate", f"{stu_att:.1f}%")
+        col2.metric("Average Score", f"{stu_marks['Marks'].mean():.1f}")
 
-        s1 = students[students["Name"] == student1]
-        s2 = students[students["Name"] == student2]
+        # Radar chart
+        subj_perf = stu_marks.groupby("Subject")["Marks"].mean().reset_index()
+        fig_radar = go.Figure()
+        fig_radar.add_trace(
+            go.Scatterpolar(
+                r=subj_perf["Marks"],
+                theta=subj_perf["Subject"],
+                fill="toself",
+                name=student,
+            )
+        )
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            title="Subject-wise Performance",
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
 
-        if not s1.empty and not s2.empty:
-            col1.metric(student1 + " Avg Score", round(s1["AverageScore"].iloc[0], 2))
-            col2.metric(student2 + " Avg Score", round(s2["AverageScore"].iloc[0], 2))
+        if st.checkbox("Show Explanation (Radar Chart)"):
+            st.info(
+                "The radar chart shows subject strengths and weaknesses. "
+                "The further out from the center, the better the performance."
+            )
 
-            # Subject-wise comparison
-            comp = marks[marks["Name"].isin([student1, student2])]
-            fig, ax = plt.subplots()
-            sns.barplot(data=comp, x="Subject", y="Marks", hue="Name", ax=ax)
-            ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-            st.pyplot(fig)
+    # ========================
+    # TAB 3: STUDENT COMPARISON
+    # ========================
+    with tab3:
+        st.subheader("Student Comparison")
+        s1, s2 = st.columns(2)
+        stu1 = s1.selectbox("Select First Student", students["Name"].unique())
+        stu2 = s2.selectbox("Select Second Student", students["Name"].unique())
 
-            with st.expander("ℹ️ What this means"):
-                st.write("""
-                Here you see how both students perform in each subject side-by-side.  
-                It's a direct comparison of strengths and weaknesses.  
-                """)
+        comp = marks.loc[
+            (marks["Name"].isin([stu1, stu2])) & (~marks["WasAbsent"])
+        ].groupby(["Name", "Subject"])["Marks"].mean().reset_index()
 
-    # -------- CLUSTERING TAB --------
-    with tabs[3]:
-        st.header("🔍 Clustering Insights")
+        fig_comp = px.bar(
+            comp,
+            x="Subject",
+            y="Marks",
+            color="Name",
+            barmode="group",
+            title=f"{stu1} vs {stu2} - Subject Comparison",
+        )
+        st.plotly_chart(fig_comp, use_container_width=True)
 
-        X = students[["AttendanceRate", "AverageScore"]].fillna(0)
+        if st.checkbox("Show Explanation (Student Comparison)"):
+            st.info(
+                "This chart compares two students across subjects. "
+                "It only includes exams they actually attempted (absences excluded)."
+            )
+
+    # ========================
+    # TAB 4: TRENDS & CLUSTERS
+    # ========================
+    with tab4:
+        st.subheader("Trends & Clusters")
+
+        # Time series
+        avg_time = (
+            marks.loc[~marks["WasAbsent"]]
+            .groupby(["ExamNumber"])["Marks"]
+            .mean()
+            .reset_index()
+        )
+        fig_time = px.line(
+            avg_time,
+            x="ExamNumber",
+            y="Marks",
+            title="Class Average Over Exams",
+            markers=True,
+        )
+        st.plotly_chart(fig_time, use_container_width=True)
+
+        if st.checkbox("Show Explanation (Class Average Trend)"):
+            st.info(
+                "This line chart shows how the class average evolves across exam numbers. "
+                "It helps identify improvement or decline over time."
+            )
+
+        # Clustering
+        X = students[["AttendanceRate", "AvgScore"]].dropna()
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
         kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-        students["Cluster"] = kmeans.fit_predict(X_scaled)
+        clusters = kmeans.fit_predict(X_scaled)
+        X["Cluster"] = clusters
+        X["Name"] = students.loc[X.index, "Name"]
 
-        fig, ax = plt.subplots()
-        sns.scatterplot(
-            data=students,
+        fig_cluster = px.scatter(
+            X,
             x="AttendanceRate",
-            y="AverageScore",
-            hue="Cluster",
-            palette="Set1",
-            ax=ax
+            y="AvgScore",
+            color="Cluster",
+            text="Name",
+            title="Student Clusters",
         )
-        st.pyplot(fig)
+        st.plotly_chart(fig_cluster, use_container_width=True)
 
-        with st.expander("ℹ️ What this means"):
-            st.write("""
-            Students are grouped into clusters:
-            - High Attendance + High Performance  
-            - Low Attendance + Low Performance  
-            - Mixed behavior  
-            
-            This helps identify who needs support and who excels.  
-            """)
+        if st.checkbox("Show Explanation (Clusters)"):
+            st.info(
+                "Students are grouped into clusters based on attendance and performance. "
+                "This helps identify groups like 'High Achievers', 'Struggling Students', "
+                "and 'Disengaged but Bright'."
+            )
 
 else:
-    st.warning("⬆️ Please upload both attendance and marks CSV files.")
+    st.warning("Please upload both Attendance and Marks CSV files to continue.")
