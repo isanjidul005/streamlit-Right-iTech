@@ -34,8 +34,10 @@ def read_data_file(file):
         # Streamlit file_uploader provides file-like object
         file_extension = file.name.split('.')[-1].lower()
         if file_extension == 'csv':
-            return pd.read_csv(file, skiprows=1) # The files have an extra header row
+            # Specify header=1 to use the second row as headers (index 1)
+            return pd.read_csv(file, skiprows=1)
         elif file_extension in ['xlsx', 'xls']:
+            # Specify header=1 to use the second row as headers (index 1)
             return pd.read_excel(file, skiprows=1)
         else:
             st.error(f"Unsupported file format: {file.name}")
@@ -43,15 +45,6 @@ def read_data_file(file):
     except Exception as e:
         st.error(f"Error reading file {file.name}: {str(e)}")
         return None
-
-# Function to find column names by pattern
-def find_column_by_pattern(df, patterns):
-    """Find column names that match given patterns"""
-    for pattern in patterns:
-        for col in df.columns:
-            if pattern.lower() in col.lower():
-                return col
-    return None
 
 # File upload and data processing
 @st.cache_data
@@ -67,16 +60,12 @@ def process_uploaded_files(attendance_files, score_file):
         # FIX: Convert all column names to strings to prevent 'int' object has no attribute 'lower' error
         df.columns = df.columns.astype(str)
 
-        # Standardize column names
-        id_col = find_column_by_pattern(df, ['id', 'student id', 'roll no', 'roll number'])
-        name_col = find_column_by_pattern(df, ['name', 'student name', 'student'])
-        
-        if id_col and name_col:
-            df = df.rename(columns={id_col: 'ID', name_col: 'Name'})
-        else:
+        # Standardize column names based on file format
+        if 'ID' not in df.columns or 'Name' not in df.columns:
             st.warning(f"Could not find ID/Name columns in {file.name}. Using first two columns.")
             if len(df.columns) >= 2:
-                df = df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Name'})
+                # Assuming ID is first and Name is second
+                df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Name'}, inplace=True)
             else:
                 st.error(f"File {file.name} doesn't have enough columns")
                 continue
@@ -135,20 +124,13 @@ def process_uploaded_files(attendance_files, score_file):
     # FIX: Convert all score column names to strings as well
     score_df.columns = score_df.columns.astype(str)
     
-    # Standardize score column names
-    id_col = find_column_by_pattern(score_df, ['id', 'student id', 'roll no', 'roll number'])
-    name_col = find_column_by_pattern(score_df, ['name', 'student name', 'student'])
-    
-    if id_col and name_col:
-        score_df = score_df.rename(columns={id_col: 'ID', name_col: 'Name'})
-    else:
-        st.warning(f"Could not find ID/Name columns in score file. Using first two columns.")
-        if len(score_df.columns) >= 2:
-            score_df = score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[1]: 'Name'})
-        else:
-            st.error("Score file doesn't have enough columns")
-            return None, None, None
-    
+    # Check if a column named 'Name' exists. If not, try to rename a likely candidate.
+    if 'Name' not in score_df.columns:
+        # Assuming Name is the third column, as per the user's file format.
+        if len(score_df.columns) >= 3:
+            score_df.rename(columns={score_df.columns[2]: 'Name'}, inplace=True)
+            st.warning("The 'Name' column was not found. Renamed the third column to 'Name'.")
+
     # Drop "Total" and "Merit" columns as they are not needed for melting
     score_df = score_df.drop(columns=[col for col in score_df.columns if 'Total' in col or 'Merit' in col], errors='ignore')
 
