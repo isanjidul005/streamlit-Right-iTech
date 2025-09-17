@@ -406,7 +406,10 @@ def main():
 
         st.markdown('**Outliers**: high attendance but low score, or low attendance but high score')
         # find some outliers
-        outliers = student_aggs[(student_aggs['AttendanceRate']>0.85) & (student_aggs['AvgScore']<40)].append(student_aggs[(student_aggs['AttendanceRate']<0.5) & (student_aggs['AvgScore']>75)])
+        outliers = pd.concat([
+            student_aggs[(student_aggs['AttendanceRate'] > 0.85) & (student_aggs['AvgScore'] < 40)],
+            student_aggs[(student_aggs['AttendanceRate'] < 0.5) & (student_aggs['AvgScore'] > 75)]
+        ])
         if not outliers.empty:
             st.dataframe(outliers[['ID','Name','Roll','Gender','AvgScore','AttendanceRate']].head(20).style.format({'AttendanceRate':'{:.1%}','AvgScore':'{:.1f}'}))
         else:
