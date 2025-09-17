@@ -115,11 +115,12 @@ def process_uploaded_files(attendance_files, score_file):
     
     attendance_long.dropna(subset=['Date'], inplace=True)
     
-    # Process score file
-    score_df = read_data_file(score_file)
-    if score_df is None:
-        return None, None, None
-
+ # Process score file
+score_df = read_data_file(score_file)
+print(score_df.head()) # <--- ADD THIS LINE
+if score_df is None:
+    return None, None, None
+    
     # Convert all score column names to strings as well
     score_df.columns = score_df.columns.astype(str)
     
