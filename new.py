@@ -8,9 +8,21 @@ st.set_page_config(page_title="Student Dashboard", layout="wide")
 # ----------------------------
 # File readers
 # ----------------------------
+def read_data_file(file, header_row):
+    """Read CSV or Excel files with a specific header row."""
+    file_extension = file.name.split('.')[-1].lower()
+    if file_extension == 'csv':
+        df = pd.read_csv(file, header=header_row)
+    elif file_extension in ['xlsx', 'xls']:
+        df = pd.read_excel(file, header=header_row)
+    else:
+        st.error(f"Unsupported file format: {file.name}")
+        return None
+    return df
+
 def read_attendance_file(file, gender):
     """Read and clean attendance file, fix messy headers, tag gender"""
-    df_raw = pd.read_excel(file, header=None)
+    df_raw = read_data_file(file, header=None)
 
     # Drop the first row (report title)
     df = df_raw.drop(0).reset_index(drop=True)
@@ -18,6 +30,7 @@ def read_attendance_file(file, gender):
     # Use the next row as header
     df.columns = df.iloc[0]
     df = df.drop(0).reset_index(drop=True)
+    df.columns = df.columns.astype(str)
 
     # If headers are still messy -> fix manually
     cols = list(df.columns)
@@ -31,16 +44,17 @@ def read_attendance_file(file, gender):
     return df
 
 def read_score_file(file):
-    """Read and clean score file with messy headers"""
-    df_raw = pd.read_excel(file, header=None)
+    """Read and clean score file with single-row header"""
+    df = read_data_file(file, header=0)
     
-    # Use the second row as header
-    df = df_raw.drop(0).reset_index(drop=True)
-    df.columns = df.iloc[0]
-    df = df.drop(0).reset_index(drop=True)
+    # Standardize column names to remove extra spaces
+    df.columns = df.columns.astype(str).str.strip()
     
-    # Standardize column names to lowercase
-    df.columns = df.columns.astype(str).str.strip().str.lower()
+    # Check for required columns
+    required_cols = {'ID', 'Roll', 'Name'}
+    if not required_cols.issubset(df.columns):
+        st.error(f"The score file does not contain the required columns: {required_cols - set(df.columns)}")
+        return None
     
     return df
 
@@ -51,9 +65,9 @@ def main():
     st.title("📊 Student Performance Dashboard")
 
     st.sidebar.header("Upload Files")
-    boys_file = st.sidebar.file_uploader("Upload Boys Attendance", type=["xlsx"])
-    girls_file = st.sidebar.file_uploader("Upload Girls Attendance", type=["xlsx"])
-    result_file = st.sidebar.file_uploader("Upload Score File", type=["xlsx"])
+    boys_file = st.sidebar.file_uploader("Upload Boys Attendance", type=["xlsx", "csv"])
+    girls_file = st.sidebar.file_uploader("Upload Girls Attendance", type=["xlsx", "csv"])
+    result_file = st.sidebar.file_uploader("Upload Score File", type=["xlsx", "csv"])
 
     if boys_file and girls_file and result_file:
         # Load data
@@ -61,6 +75,9 @@ def main():
         girls_df = read_attendance_file(girls_file, "Girl")
         score_df = read_score_file(result_file)
 
+        if boys_df is None or girls_df is None or score_df is None:
+            st.stop()
+            
         # Combine attendance
         attendance_df = pd.concat([boys_df, girls_df], ignore_index=True)
         
@@ -85,11 +102,11 @@ def main():
         attendance_summary.rename(columns={"Present": "AttendanceRate"}, inplace=True)
 
         # Process scores file
-        score_columns = [col for col in score_df.columns if 'wmt' in col]
+        score_columns = [col for col in score_df.columns if 'WMT' in col.upper()]
         
         # Melt scores into long format
         score_long = score_df.melt(
-            id_vars=['id', 'roll', 'name'],
+            id_vars=['ID', 'Roll', 'Name'],
             value_vars=score_columns,
             var_name='WMT',
             value_name='Score'
@@ -106,10 +123,9 @@ def main():
             score_long,
             attendance_summary,
             how="left",
-            left_on=["id", "name"],
-            right_on=["ID", "Name"]
+            on=["ID", "Name", "Roll"]
         )
-
+        
         # ---------------- Overview ----------------
         st.header("📍 Overview")
         col1, col2, col3 = st.columns(3)
