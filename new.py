@@ -115,7 +115,7 @@ def main():
         
         # Clean score data and convert to numeric, handling 'ab'
         score_long['Score'] = pd.to_numeric(
-            score_long['Score'].astype(str).str.extract(r'(\d+\.?\d*)').fillna('0'),
+            score_long['Score'].astype(str).str.extract(r'(\d+\.?\d*)')[0],
             errors='coerce'
         ).fillna(0)
         
