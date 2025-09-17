@@ -29,13 +29,9 @@ def read_data_file(file, header=None):
 
 def read_attendance_file(file, gender):
     """Read and clean attendance file, fix messy headers, tag gender"""
-    df_raw = read_data_file(file, header=None)
-    if df_raw is None:
+    df = read_data_file(file, header=1)
+    if df is None:
         return None
-
-    # Use the second row as the real header
-    df = df_raw.iloc[1:].copy()
-    df.columns = df_raw.iloc[0]
     
     # Standardize column names by stripping spaces
     df.columns = df.columns.astype(str).str.strip()
