@@ -103,6 +103,7 @@ def process_uploaded_files(attendance_files, score_file):
     non_date_columns = ['ID', 'Name', 'Gender', 'Roll']
     date_columns = [col for col in attendance.columns if col not in non_date_columns]
 
+    # FIX: Check if date_columns is empty before proceeding
     if not date_columns:
         st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
         return None, None, None
@@ -154,6 +155,11 @@ def process_uploaded_files(attendance_files, score_file):
     # Identify score columns (non-ID and non-Name columns)
     score_columns = [col for col in score_df.columns if col not in ['ID', 'Name']]
     
+    # FIX: Check if score_columns is empty before proceeding
+    if not score_columns:
+        st.error("Could not identify score columns. Please ensure your score file has score data.")
+        return None, None, None
+
     # Clean score data and convert to numeric
     for col in score_columns:
         score_df[col] = pd.to_numeric(
