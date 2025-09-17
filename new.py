@@ -1,13 +1,15 @@
 import streamlit as st
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Student Dashboard", layout="wide")
 
 # ----------------------------
-# File reader
+# File readers
 # ----------------------------
-def read_attendance_file(file):
-    """Read and clean attendance file"""
+def read_attendance_file(file, gender):
+    """Read and clean attendance file, fix messy headers, tag gender"""
     df_raw = pd.read_excel(file, header=None)
 
     # Drop the first row (report title)
@@ -17,15 +19,15 @@ def read_attendance_file(file):
     df.columns = df.iloc[0]
     df = df.drop(0).reset_index(drop=True)
 
-    # If columns still look like Unnamed, rename manually
+    # If headers are still messy -> fix manually
     cols = list(df.columns)
     if all(str(c).startswith("Unnamed") or pd.isna(c) for c in cols):
         new_cols = ["ID", "Roll", "Name"] + [f"Day{i}" for i in range(1, len(cols)-2+1)]
         df.columns = new_cols
     else:
-        # Otherwise enforce first 3 cols
         df.rename(columns={cols[0]: "ID", cols[1]: "Roll", cols[2]: "Name"}, inplace=True)
 
+    df["Gender"] = gender
     return df
 
 def read_score_file(file):
@@ -33,7 +35,7 @@ def read_score_file(file):
     return pd.read_excel(file)
 
 # ----------------------------
-# Main
+# Dashboard
 # ----------------------------
 def main():
     st.title("📊 Student Performance Dashboard")
@@ -43,20 +45,98 @@ def main():
     girls_file = st.sidebar.file_uploader("Upload Girls Attendance", type=["xlsx"])
     result_file = st.sidebar.file_uploader("Upload Score File", type=["xlsx"])
 
-    if boys_file and girls_file:
-        boys_df = read_attendance_file(boys_file)
-        girls_df = read_attendance_file(girls_file)
-        st.success("✅ Attendance files processed")
-        with st.expander("Preview Attendance (Boys)"):
-            st.dataframe(boys_df.head())
-        with st.expander("Preview Attendance (Girls)"):
-            st.dataframe(girls_df.head())
-
-    if result_file:
+    if boys_file and girls_file and result_file:
+        # Load data
+        boys_df = read_attendance_file(boys_file, "Boy")
+        girls_df = read_attendance_file(girls_file, "Girl")
         score_df = read_score_file(result_file)
-        st.success("✅ Score file processed")
-        with st.expander("Preview Scores"):
-            st.dataframe(score_df.head())
 
+        # Combine attendance
+        attendance_df = pd.concat([boys_df, girls_df], ignore_index=True)
+
+        # Melt attendance into long form
+        attendance_long = attendance_df.melt(
+            id_vars=["ID", "Roll", "Name", "Gender"],
+            var_name="Date",
+            value_name="Status"
+        )
+
+        # Clean up attendance (P = present, A = absent, etc.)
+        attendance_long["Present"] = attendance_long["Status"].apply(
+            lambda x: 1 if str(x).strip().upper() == "P" else 0
+        )
+
+        # Attendance summary per student
+        attendance_summary = (
+            attendance_long.groupby(["ID", "Name", "Gender"])["Present"]
+            .mean()
+            .reset_index()
+        )
+        attendance_summary.rename(columns={"Present": "AttendanceRate"}, inplace=True)
+
+        # Merge with scores
+        combined = pd.merge(
+            score_df,
+            attendance_summary,
+            how="left",
+            on=["ID", "Name"]
+        )
+
+        # ---------------- Overview ----------------
+        st.header("📍 Overview")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Students", len(combined))
+        col2.metric("Avg Score", f"{combined['Score'].mean():.2f}")
+        col3.metric("Avg Attendance", f"{combined['AttendanceRate'].mean()*100:.1f}%")
+
+        # ---------------- Gender Comparison ----------------
+        st.header("👫 Gender Comparison")
+        gender_summary = combined.groupby("Gender").agg(
+            AvgScore=("Score", "mean"),
+            AvgAttendance=("AttendanceRate", "mean"),
+            Count=("ID", "count")
+        ).reset_index()
+
+        st.dataframe(gender_summary)
+
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+        sns.barplot(data=gender_summary, x="Gender", y="AvgScore", ax=ax[0])
+        ax[0].set_title("Average Score by Gender")
+        sns.barplot(data=gender_summary, x="Gender", y="AvgAttendance", ax=ax[1])
+        ax[1].set_title("Average Attendance by Gender")
+        st.pyplot(fig)
+
+        # ---------------- Attendance vs Score ----------------
+        st.header("📈 Attendance vs Score")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.scatterplot(
+            data=combined,
+            x="AttendanceRate",
+            y="Score",
+            hue="Gender",
+            ax=ax
+        )
+        st.pyplot(fig)
+
+        # ---------------- Trends ----------------
+        st.header("📅 Attendance Trend Over Time")
+        trend = attendance_long.groupby("Date")["Present"].mean().reset_index()
+        fig, ax = plt.subplots(figsize=(8, 4))
+        sns.lineplot(data=trend, x="Date", y="Present", marker="o", ax=ax)
+        ax.set_ylabel("Attendance Rate")
+        st.pyplot(fig)
+
+        # ---------------- Data Previews ----------------
+        with st.expander("Preview: Attendance (long format)"):
+            st.dataframe(attendance_long.head())
+        with st.expander("Preview: Score File"):
+            st.dataframe(score_df.head())
+        with st.expander("Preview: Combined Data"):
+            st.dataframe(combined.head())
+
+    else:
+        st.info("⬅️ Upload all three files to start.")
+
+# ----------------------------
 if __name__ == "__main__":
     main()
