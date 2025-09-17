@@ -39,9 +39,8 @@ def read_score_file(file):
     df.columns = df.iloc[0]
     df = df.drop(0).reset_index(drop=True)
     
-    # Standardize column names
+    # Standardize column names to lowercase
     df.columns = df.columns.astype(str).str.strip().str.lower()
-    df.rename(columns={'id': 'ID', 'roll': 'Roll', 'name': 'Name'}, inplace=True)
     
     return df
 
@@ -64,7 +63,7 @@ def main():
 
         # Combine attendance
         attendance_df = pd.concat([boys_df, girls_df], ignore_index=True)
-
+        
         # Melt attendance into long form
         attendance_long = attendance_df.melt(
             id_vars=["ID", "Roll", "Name", "Gender"],
@@ -86,7 +85,6 @@ def main():
         attendance_summary.rename(columns={"Present": "AttendanceRate"}, inplace=True)
 
         # Process scores file
-        score_df.columns = score_df.columns.str.lower()
         score_columns = [col for col in score_df.columns if 'wmt' in col]
         
         # Melt scores into long format
@@ -108,7 +106,8 @@ def main():
             score_long,
             attendance_summary,
             how="left",
-            on=["ID", "Name"]
+            left_on=["id", "name"],
+            right_on=["ID", "Name"]
         )
 
         # ---------------- Overview ----------------
