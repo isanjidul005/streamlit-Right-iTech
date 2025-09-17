@@ -1,442 +1,466 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
-from io import StringIO
+import plotly.express as px
+import plotly.graph_objects as go
+import calendar
+from datetime import datetime, timedelta
+import random
 
-# -----------------------------
-# Student Analytics Dashboard
-# Single-file Streamlit app (robust, interactive, uploadable)
-# -----------------------------
+# Set page configuration
+st.set_page_config(
+    page_title="Student Analytics Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Student Analytics Dashboard", layout="wide")
-st.title("📊 Student Analytics Dashboard — Robust Edition")
+# Function to generate synthetic attendance data if not provided
+def generate_attendance_data(result_df):
+    # Create a list of dates for the semester (assuming 4 months)
+    start_date = datetime(2023, 1, 1)
+    end_date = datetime(2023, 4, 30)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    # Filter to only weekdays
+    date_range = [d for d in date_range if d.weekday() < 5]
+    
+    attendance_data = []
+    for student in result_df['Name'].unique():
+        for date in date_range:
+            # Higher performing students have better attendance
+            student_merit = result_df[result_df['Name'] == student]['Merit'].values[0]
+            attendance_prob = 0.9 if student_merit <= 10 else 0.7 if student_merit <= 20 else 0.5
+            
+            status = 'Present' if random.random() < attendance_prob else 'Absent'
+            attendance_data.append({
+                'ID': result_df[result_df['Name'] == student]['ID'].values[0],
+                'Roll': result_df[result_df['Name'] == student]['Roll'].values[0],
+                'Name': student,
+                'Date': date,
+                'Status': status
+            })
+    
+    return pd.DataFrame(attendance_data)
 
-# -----------------------------
-# Utilities
-# -----------------------------
-@st.cache_data
-def safe_read_csv(uploaded) -> pd.DataFrame:
-    """Read a CSV from uploaded file-like or path string robustly."""
-    if uploaded is None:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(uploaded)
-    except Exception:
-        # try with different encodings / separators
-        try:
-            return pd.read_csv(uploaded, encoding='utf-8', sep=None, engine='python')
-        except Exception:
-            return pd.read_csv(uploaded, encoding='latin1')
+# Preprocess data
+def preprocess_data(attendance_df, result_df):
+    # Convert Date column to datetime if it exists
+    if 'Date' in attendance_df.columns:
+        attendance_df['Date'] = pd.to_datetime(attendance_df['Date'])
+        
+        # Extract month and day from Date
+        attendance_df['Month'] = attendance_df['Date'].dt.month
+        attendance_df['Day'] = attendance_df['Date'].dt.day
+        attendance_df['Day_Name'] = attendance_df['Date'].dt.day_name()
+        attendance_df['Week'] = attendance_df['Date'].dt.isocalendar().week
+        
+        # Create a status code for attendance (Present=1, Absent=0)
+        attendance_df['Status_Code'] = attendance_df['Status'].apply(lambda x: 1 if x == 'Present' else 0)
+    
+    # Calculate total marks for each student
+    numeric_cols = result_df.select_dtypes(include=[np.number]).columns.tolist()
+    if 'Merit' in numeric_cols:
+        numeric_cols.remove('Merit')
+    if 'ID' in numeric_cols:
+        numeric_cols.remove('ID')
+    if 'Roll' in numeric_cols:
+        numeric_cols.remove('Roll')
+    
+    # Calculate average marks for each assessment category
+    assessment_columns = [col for col in result_df.columns if 'WMT' in col and '.' not in col]
+    assessment_categories = list(set([col.split('[')[0].strip() for col in assessment_columns]))
+    
+    # Create category averages
+    for category in assessment_categories:
+        category_cols = [col for col in result_df.columns if category in col]
+        result_df[f'{category}_Avg'] = result_df[category_cols].apply(
+            lambda x: pd.to_numeric(x, errors='coerce').mean(), axis=1)
+    
+    return attendance_df, result_df, assessment_categories
 
+# Create heatmap calendar for attendance
+def create_attendance_heatmap(student_attendance, student_name):
+    # Create a pivot table for the heatmap
+    heatmap_data = student_attendance.pivot_table(
+        values='Status_Code', 
+        index='Day_Name', 
+        columns='Week', 
+        aggfunc='mean',
+        fill_value=0
+    )
+    
+    # Order days of week properly
+    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    heatmap_data = heatmap_data.reindex(days_order)
+    
+    # Create heatmap
+    fig = px.imshow(
+        heatmap_data,
+        labels=dict(x="Week", y="Day", color="Attendance Rate"),
+        title=f"Attendance Calendar Heatmap for {student_name}",
+        aspect="auto",
+        color_continuous_scale="RdYlGn"
+    )
+    
+    fig.update_layout(
+        xaxis_title="Week of Year",
+        yaxis_title="Day of Week"
+    )
+    
+    return fig
 
-def ensure_date(df, col_candidates=["Date", "date", "day", "attendance_date"]):
-    for c in col_candidates:
-        if c in df.columns:
-            try:
-                df[c] = pd.to_datetime(df[c], errors='coerce')
-                return df, c
-            except Exception:
-                continue
-    # fallback: try to infer any datetime-like column
-    for c in df.columns:
-        if df[c].dtype == object:
-            parsed = pd.to_datetime(df[c], errors='coerce')
-            if parsed.notna().sum() > 0:
-                df[c] = parsed
-                return df, c
-    return df, None
+# Create performance radar chart
+def create_radar_chart(student_data, student_name, categories):
+    fig = go.Figure()
+    
+    # Get the average scores for each category
+    values = [student_data[f'{category}_Avg'].values[0] for category in categories]
+    
+    # Add trace
+    fig.add_trace(go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        name=student_name
+    ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 30]
+            )),
+        title=f"Performance Radar Chart for {student_name}",
+        showlegend=True
+    )
+    
+    return fig
 
-
-def safe_numeric(df, col):
-    if col not in df.columns:
-        return df
-    df[col] = pd.to_numeric(df[col], errors='coerce')
-    return df
-
-
-# -----------------------------
-# Sidebar: file upload or use example files
-# -----------------------------
-st.sidebar.header("Data")
-use_upload = st.sidebar.radio("Load data from", ["Upload CSVs", "Use server CSVs (if present)"])
-
-attendance = pd.DataFrame()
-results = pd.DataFrame()
-
-if use_upload == "Upload CSVs":
-    att_file = st.sidebar.file_uploader("Upload attendance CSV", type=["csv"]) 
-    res_file = st.sidebar.file_uploader("Upload results CSV", type=["csv"]) 
-    if att_file is not None:
-        attendance = safe_read_csv(att_file)
-    if res_file is not None:
-        results = safe_read_csv(res_file)
-else:
-    # fallback to local known filenames (useful when running on server)
-    try:
-        attendance = safe_read_csv("/mnt/data/cleaned_attendance_data.csv")
-        results = safe_read_csv("/mnt/data/cleaned_result_data.csv")
-    except Exception:
-        attendance = pd.DataFrame()
-        results = pd.DataFrame()
-
-# Quick validation / preview
-st.sidebar.markdown("---")
-if attendance.empty and results.empty:
-    st.warning("No data loaded yet. Upload two CSV files: attendance and results, or place them in /mnt/data with names cleaned_attendance_data.csv and cleaned_result_data.csv")
-else:
-    st.sidebar.success("Data loaded — see main view for previews")
-
-# -----------------------------
-# Data cleaning & normalization
-# -----------------------------
-@st.cache_data
-def prepare_data(att: pd.DataFrame, res: pd.DataFrame):
-    att = att.copy()
-    res = res.copy()
-
-    # normalize column names
-    att.columns = [c.strip() for c in att.columns]
-    res.columns = [c.strip() for c in res.columns]
-
-    # Find student id column (common names)
-    sid_candidates = ["StudentID", "student_id", "id", "studentid", "roll"]
-    sid_att = next((c for c in att.columns if c in sid_candidates), None)
-    sid_res = next((c for c in res.columns if c in sid_candidates), None)
-
-    # If not found, try first column
-    if sid_att is None and len(att.columns) > 0:
-        sid_att = att.columns[0]
-    if sid_res is None and len(res.columns) > 0:
-        sid_res = res.columns[0]
-
-    # rename them to StudentID
-    if sid_att:
-        att = att.rename(columns={sid_att: 'StudentID'})
-    if sid_res:
-        res = res.rename(columns={sid_res: 'StudentID'})
-
-    # Ensure numeric attendance (if stored as 1/0 or Present/Absent)
-    # common attendance column names
-    att_col_candidates = ['Attendance', 'attendance', 'Present', 'present']
-    att_col = next((c for c in att.columns if c in att_col_candidates), None)
-    if att_col is None:
-        # try to infer a binary/numeric column
-        for c in att.columns:
-            if att[c].dropna().isin([0,1]).any() or att[c].dropna().isin(['P','A','Present','Absent']).any():
-                att_col = c
-                break
-    if att_col:
-        # convert textual to numeric
-        def map_att(x):
-            if pd.isna(x):
-                return np.nan
-            if str(x).strip().lower() in ['p','present','1','yes','y','true']:
-                return 1
-            if str(x).strip().lower() in ['a','absent','0','no','n','false']:
-                return 0
-            try:
-                return float(x)
-            except Exception:
-                return np.nan
-        att['Attendance'] = att[att_col].apply(map_att)
-    else:
-        # If no attendance-like column, create an attendance column with NaN
-        att['Attendance'] = np.nan
-
-    # Results: find marks column
-    mark_candidates = ['Marks', 'marks', 'Score', 'score', 'Total']
-    mark_col = next((c for c in res.columns if c in mark_candidates), None)
-    if mark_col:
-        res['Marks'] = pd.to_numeric(res[mark_col], errors='coerce')
-    else:
-        # try to find numeric columns
-        nums = [c for c in res.columns if pd.api.types.is_numeric_dtype(res[c])]
-        if nums:
-            res['Marks'] = pd.to_numeric(res[nums[0]], errors='coerce')
+# Main app
+def main():
+    st.title("🎓 Student Performance & Attendance Analytics Dashboard")
+    
+    # File upload section
+    st.sidebar.header("Upload Data Files")
+    
+    # Upload result data
+    result_file = st.sidebar.file_uploader("Upload Result Data (CSV)", type=["csv"], key="result")
+    
+    # Upload attendance data
+    attendance_file = st.sidebar.file_uploader("Upload Attendance Data (CSV)", type=["csv"], key="attendance")
+    
+    if result_file is not None:
+        result_df = pd.read_csv(result_file)
+        st.sidebar.success("Result data uploaded successfully!")
+        
+        if attendance_file is not None:
+            attendance_df = pd.read_csv(attendance_file)
+            st.sidebar.success("Attendance data uploaded successfully!")
         else:
-            res['Marks'] = np.nan
-
-    # Dates
-    att, att_date_col = ensure_date(att)
-    if att_date_col is None:
-        # create synthetic date index if absent
-        att['Date'] = pd.NaT
-    else:
-        if att_date_col != 'Date':
-            att = att.rename(columns={att_date_col: 'Date'})
-
-    # common exam column
-    exam_candidates = ['Exam', 'exam', 'Term', 'term', 'Subject']
-    exam_col = next((c for c in res.columns if c in exam_candidates), None)
-    if exam_col:
-        res = res.rename(columns={exam_col: 'Exam'})
-    else:
-        res['Exam'] = res.get('Exam', 'Exam')
-
-    # standardize StudentID to string
-    for df in [att, res]:
-        if 'StudentID' in df.columns:
-            df['StudentID'] = df['StudentID'].astype(str)
-
-    return att, res
-
-attendance, results = prepare_data(attendance, results)
-
-# -----------------------------
-# KPIs and quick stats
-# -----------------------------
-st.markdown("---")
-col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-
-with col_kpi1:
-    st.metric("Total Students (attendance)", int(attendance['StudentID'].nunique()) if not attendance.empty else 0)
-with col_kpi2:
-    st.metric("Total Students (results)", int(results['StudentID'].nunique()) if not results.empty else 0)
-with col_kpi3:
-    avg_att = attendance['Attendance'].mean() if 'Attendance' in attendance.columns and not attendance.empty else np.nan
-    st.metric("Average Attendance", f"{(avg_att*100):.2f}%" if not np.isnan(avg_att) else "N/A")
-with col_kpi4:
-    avg_marks = results['Marks'].mean() if 'Marks' in results.columns and not results.empty else np.nan
-    st.metric("Average Marks", f"{avg_marks:.2f}" if not np.isnan(avg_marks) else "N/A")
-
-# -----------------------------
-# Main Tabs
-# -----------------------------
-tabs = st.tabs(["Class Overview", "Student Profile", "Attendance Heatmap", "Comparison", "Results Analysis", "Alerts & Predictions"]) 
-
-# -----------------------------
-# 1) Class Overview
-# -----------------------------
-with tabs[0]:
-    st.header("🏫 Class Overview")
-
-    if attendance.empty and results.empty:
-        st.info("Upload data to see class overview")
-    else:
-        # Attendance distribution across students
-        if not attendance.empty and 'Attendance' in attendance.columns:
-            att_by_student = attendance.groupby('StudentID')['Attendance'].mean().fillna(0).sort_values(ascending=False)
-            st.subheader("Attendance by student (avg)")
-            st.dataframe(att_by_student.reset_index().rename(columns={'Attendance':'AvgAttendance'}).head(50))
-            st.bar_chart(att_by_student)
-
-        # Marks distribution
-        if not results.empty and 'Marks' in results.columns:
-            st.subheader("Marks distribution")
-            fig, ax = plt.subplots()
-            sns.histplot(results['Marks'].dropna(), kde=True, ax=ax)
-            st.pyplot(fig)
-
-        # Attendance vs Marks (merged)
-        if (not attendance.empty) and (not results.empty):
-            merged = attendance.groupby('StudentID')['Attendance'].mean().reset_index().rename(columns={'Attendance':'AvgAttendance'})
-            merged = merged.merge(results.groupby('StudentID')['Marks'].mean().reset_index().rename(columns={'Marks':'AvgMarks'}), on='StudentID', how='inner')
-            st.subheader('Attendance vs Average Marks')
-            fig, ax = plt.subplots()
-            sns.scatterplot(data=merged, x='AvgAttendance', y='AvgMarks', ax=ax)
-            ax.set_xlabel('Average Attendance (0-1)')
-            st.pyplot(fig)
-
-# -----------------------------
-# 2) Student Profile
-# -----------------------------
-with tabs[1]:
-    st.header("👤 Student Profile — Deep Dive")
-    if attendance.empty and results.empty:
-        st.info("Upload data to explore profiles")
-    else:
-        students = sorted(set(list(attendance.get('StudentID',[])) + list(results.get('StudentID',[]))))
-        sel = st.selectbox('Select a student', students)
-        if sel:
-            st.subheader(f"Overview for Student {sel}")
-            st.markdown("**Summary**")
-            att_s = attendance[attendance['StudentID']==sel]
-            res_s = results[results['StudentID']==sel]
-
-            # Basic numbers
+            st.sidebar.info("No attendance data provided. Generating synthetic data for demonstration.")
+            attendance_df = generate_attendance_data(result_df)
+        
+        # Preprocess data
+        attendance_df, result_df, assessment_categories = preprocess_data(attendance_df, result_df)
+        
+        # Create tabs
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "🏫 Class Overview", 
+            "👤 Student Profile", 
+            "📊 Comparison", 
+            "📅 Attendance Analysis",
+            "📈 Performance Trends"
+        ])
+        
+        # Tab 1: Class Overview
+        with tab1:
+            st.header("Class Overview")
+            
             col1, col2, col3 = st.columns(3)
+            
             with col1:
-                st.metric("Attendance %", f"{(att_s['Attendance'].mean()*100):.2f}%" if not att_s.empty and not np.isnan(att_s['Attendance'].mean()) else 'N/A')
+                total_students = result_df['Name'].nunique()
+                st.metric("Total Students", total_students)
+            
             with col2:
-                st.metric("Avg Marks", f"{res_s['Marks'].mean():.2f}" if not res_s.empty and not np.isnan(res_s['Marks'].mean()) else 'N/A')
+                avg_total_marks = result_df['Total (1170)'].mean()
+                st.metric("Average Total Marks", f"{avg_total_marks:.2f}")
+            
             with col3:
-                st.metric("Total Records (attendance)", len(att_s))
-
-            # Attendance timeline
-            if 'Date' in att_s.columns and att_s['Date'].notna().any():
-                att_time = att_s.set_index('Date').sort_index()
-                st.subheader('Attendance over time')
-                st.line_chart(att_time['Attendance'].resample('D').mean().fillna(0))
-
-            # Results timeline
-            if not res_s.empty:
-                st.subheader('Marks over exams')
-                tmp = res_s.copy()
-                if 'Exam' not in tmp.columns:
-                    tmp['Exam'] = range(len(tmp))
-                tmp = tmp.sort_values('Exam')
-                st.line_chart(tmp.set_index('Exam')['Marks'])
-
-            # Detailed tables
-            with st.expander('Attendance records'):
-                st.dataframe(att_s.sort_values('Date').reset_index(drop=True))
-            with st.expander('Result records'):
-                st.dataframe(res_s.reset_index(drop=True))
-
-# -----------------------------
-# 3) Attendance Heatmap
-# -----------------------------
-with tabs[2]:
-    st.header('📅 Attendance Heatmap (calendar-like)')
-    if attendance.empty:
-        st.info('Upload attendance data to view heatmaps')
-    else:
-        students = attendance['StudentID'].unique()
-        student = st.selectbox('Select Student for heatmap', students)
-        att_s = attendance[attendance['StudentID']==student].copy()
-        if att_s.empty or att_s['Date'].isna().all():
-            st.warning('No date-attendance records for this student')
-        else:
-            att_s['Date'] = pd.to_datetime(att_s['Date'])
-            att_s['val'] = att_s['Attendance'].fillna(0)
-
-            # build pivot of year-month-day average attendance
-            att_s['year'] = att_s['Date'].dt.year
-            att_s['month'] = att_s['Date'].dt.month
-            att_s['day'] = att_s['Date'].dt.day
-
-            # allow choosing year-month
-            years = sorted(att_s['year'].unique())
-            y = st.selectbox('Year', years, index=len(years)-1)
-            months = sorted(att_s[att_s['year']==y]['month'].unique())
-            m = st.selectbox('Month', months)
-
-            month_df = att_s[(att_s['year']==y)&(att_s['month']==m)]
-            heat = month_df.pivot_table(index='day', columns='month', values='val', aggfunc='mean').fillna(0)
-
-            # Simple vertical heatmap (days vs month)
-            fig, ax = plt.subplots(figsize=(6,8))
-            sns.heatmap(heat, annot=True, fmt='.2f', ax=ax, cbar=True)
-            ax.set_ylabel('Day of month')
-            st.pyplot(fig)
-
-# -----------------------------
-# 4) Comparison
-# -----------------------------
-with tabs[3]:
-    st.header('⚖️ Compare two students')
-    if attendance.empty and results.empty:
-        st.info('Upload data to use comparison tools')
-    else:
-        students = sorted(set(list(attendance.get('StudentID',[])) + list(results.get('StudentID',[]))))
-        st.write('Select up to two students to compare')
-        sel = st.multiselect('Students', students, default=students[:2])
-        if len(sel) >= 1:
-            s1 = sel[0]
-            s2 = sel[1] if len(sel) > 1 else None
-
-            colA, colB = st.columns(2)
-            with colA:
-                st.subheader(f'Student {s1}')
-                a1 = attendance[attendance['StudentID']==s1]
-                r1 = results[results['StudentID']==s1]
-                st.metric('Avg Attendance', f"{a1['Attendance'].mean()*100:.2f}%" if not a1.empty else 'N/A')
-                st.metric('Avg Marks', f"{r1['Marks'].mean():.2f}" if not r1.empty else 'N/A')
-            with colB:
-                if s2:
-                    st.subheader(f'Student {s2}')
-                    a2 = attendance[attendance['StudentID']==s2]
-                    r2 = results[results['StudentID']==s2]
-                    st.metric('Avg Attendance', f"{a2['Attendance'].mean()*100:.2f}%" if not a2.empty else 'N/A')
-                    st.metric('Avg Marks', f"{r2['Marks'].mean():.2f}" if not r2.empty else 'N/A')
-
-            # Side-by-side plots
-            st.subheader('Side-by-side attendance timelines')
-            fig, ax = plt.subplots()
-            if not attendance.empty:
-                for s, label in zip(sel[:2], ['Left','Right']):
-                    tmp = attendance[attendance['StudentID']==s].copy()
-                    if 'Date' in tmp.columns:
-                        tmp['Date'] = pd.to_datetime(tmp['Date'])
-                        t = tmp.set_index('Date')['Attendance'].resample('D').mean().fillna(0)
-                        t.plot(label=s, ax=ax)
-                ax.legend()
-                st.pyplot(fig)
-
-# -----------------------------
-# 5) Results Analysis
-# -----------------------------
-with tabs[4]:
-    st.header('📑 Results Analysis')
-    if results.empty:
-        st.info('Upload results data to analyze marks')
-    else:
-        # Exam filter
-        exams = results.get('Exam', pd.Series(dtype=object)).unique().tolist()
-        exam = st.selectbox('Select exam/term (All shows combined)', ['All'] + exams)
-        df = results.copy()
-        if exam != 'All':
-            df = df[df['Exam']==exam]
-
-        st.subheader('Marks Summary')
-        st.write(df['Marks'].describe())
-
-        st.subheader('Top students')
-        top = df.groupby('StudentID')['Marks'].mean().sort_values(ascending=False).head(20)
-        st.dataframe(top.reset_index().rename(columns={'Marks':'AvgMarks'}))
-
-# -----------------------------
-# 6) Alerts & Simple Predictions
-# -----------------------------
-with tabs[5]:
-    st.header('🚨 Alerts & Simple Predictions')
-    if attendance.empty and results.empty:
-        st.info('Upload data to generate alerts')
-    else:
-        # At-risk by attendance threshold
-        thresh = st.slider('Attendance warning threshold (%)', 0, 100, 75)
-        merged_att = attendance.groupby('StudentID')['Attendance'].mean().reset_index().rename(columns={'Attendance':'AvgAttendance'})
-        at_risk = merged_att[merged_att['AvgAttendance'] < (thresh/100.0)]
-        st.subheader('Students below attendance threshold')
-        st.dataframe(at_risk)
-
-        # At-risk by marks threshold
-        mthresh = st.slider('Marks warning threshold', 0, 100, 40)
-        merged_marks = results.groupby('StudentID')['Marks'].mean().reset_index().rename(columns={'Marks':'AvgMarks'})
-        marks_risk = merged_marks[merged_marks['AvgMarks'] < mthresh]
-        st.subheader('Students below marks threshold')
-        st.dataframe(marks_risk)
-
-        # Simple linear trend prediction for marks (if multiple exams)
-        st.subheader('Simple marks trend (linear)')
-        sid = st.selectbox('Select student to predict (if multiple exam records exist)', merged_marks['StudentID'].unique().tolist())
-        if sid:
-            stud = results[results['StudentID']==sid].copy()
-            if len(stud) >= 3 and pd.api.types.is_numeric_dtype(stud['Marks']):
-                # map exam to numeric index
-                stud = stud.reset_index(drop=True)
-                x = np.arange(len(stud))
-                y = stud['Marks'].to_numpy()
-                coeff = np.polyfit(x,y,1)
-                pred_next = coeff[0]* (len(stud)) + coeff[1]
-                st.write(f"Predicted next marks (linear fit): {pred_next:.2f}")
+                if 'Status_Code' in attendance_df.columns:
+                    attendance_rate = attendance_df['Status_Code'].mean() * 100
+                    st.metric("Overall Attendance Rate", f"{attendance_rate:.1f}%")
+                else:
+                    st.metric("Overall Attendance Rate", "N/A")
+            
+            # Performance distribution
+            st.subheader("Performance Distribution")
+            fig = px.histogram(result_df, x='Total (1170)', nbins=20, 
+                              title="Distribution of Total Marks")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Gender performance comparison
+            st.subheader("Gender Performance Comparison")
+            if 'Gender' in result_df.columns:
+                gender_performance = result_df.groupby('Gender')['Total (1170)'].mean().reset_index()
+                fig = px.bar(gender_performance, x='Gender', y='Total (1170)', 
+                            title="Average Performance by Gender")
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                st.write('Not enough exam records to predict (need >=3).')
+                st.info("Gender data not available in the results file.")
+            
+            # Top performers
+            st.subheader("Top 5 Performers")
+            top_performers = result_df.nlargest(5, 'Total (1170)')[['Name', 'Total (1170)', 'Merit']]
+            st.dataframe(top_performers)
+        
+        # Tab 2: Student Profile
+        with tab2:
+            st.header("Individual Student Profile")
+            
+            # Student selection
+            student_names = result_df['Name'].unique()
+            selected_student = st.selectbox("Select a Student", student_names)
+            
+            if selected_student:
+                # Get student data
+                student_result = result_df[result_df['Name'] == selected_student]
+                student_attendance = attendance_df[attendance_df['Name'] == selected_student]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    total_marks = student_result['Total (1170)'].values[0]
+                    st.metric("Total Marks", f"{total_marks}")
+                
+                with col2:
+                    merit = student_result['Merit'].values[0]
+                    st.metric("Merit Position", f"{merit}")
+                
+                with col3:
+                    if 'Status_Code' in student_attendance.columns:
+                        attendance_count = student_attendance['Status_Code'].sum()
+                        total_days = len(student_attendance)
+                        attendance_percent = (attendance_count / total_days) * 100 if total_days > 0 else 0
+                        st.metric("Attendance Rate", f"{attendance_percent:.1f}%")
+                    else:
+                        st.metric("Attendance Rate", "N/A")
+                
+                with col4:
+                    if 'Gender' in student_result.columns:
+                        gender = student_result['Gender'].values[0]
+                        st.metric("Gender", gender)
+                    else:
+                        st.metric("Gender", "N/A")
+                
+                # Create tabs for student details
+                student_tab1, student_tab2, student_tab3 = st.tabs(["Performance", "Attendance", "Progress"])
+                
+                with student_tab1:
+                    # Radar chart for assessment categories
+                    radar_fig = create_radar_chart(student_result, selected_student, assessment_categories)
+                    st.plotly_chart(radar_fig, use_container_width=True)
+                    
+                    # Show all marks
+                    st.subheader("Detailed Marks")
+                    numeric_data = student_result.select_dtypes(include=[np.number]).iloc[0]
+                    st.dataframe(numeric_data)
+                
+                with student_tab2:
+                    if 'Status_Code' in student_attendance.columns:
+                        # Attendance heatmap
+                        heatmap_fig = create_attendance_heatmap(student_attendance, selected_student)
+                        st.plotly_chart(heatmap_fig, use_container_width=True)
+                        
+                        # Monthly attendance trend
+                        monthly_attendance = student_attendance.groupby('Month')['Status_Code'].mean().reset_index()
+                        monthly_attendance['Month'] = monthly_attendance['Month'].apply(lambda x: calendar.month_name[x])
+                        fig = px.bar(monthly_attendance, x='Month', y='Status_Code', 
+                                    title="Monthly Attendance Rate", labels={'Status_Code': 'Attendance Rate'})
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Attendance data not available for this student.")
+                
+                with student_tab3:
+                    # Progress over time (if we had temporal data for marks)
+                    st.info("Progress tracking would require temporal assessment data.")
+        
+        # Tab 3: Comparison
+        with tab3:
+            st.header("Student Comparison")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                student1 = st.selectbox("Select First Student", student_names, key="student1")
+            
+            with col2:
+                # Filter out the first student from the second dropdown
+                remaining_students = [s for s in student_names if s != student1]
+                student2 = st.selectbox("Select Second Student", remaining_students, key="student2")
+            
+            if student1 and student2:
+                # Get data for both students
+                student1_data = result_df[result_df['Name'] == student1]
+                student2_data = result_df[result_df['Name'] == student2]
+                
+                student1_attendance = attendance_df[attendance_df['Name'] == student1]
+                student2_attendance = attendance_df[attendance_df['Name'] == student2]
+                
+                # Create comparison metrics
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric(f"{student1} Total Marks", student1_data['Total (1170)'].values[0])
+                    st.metric(f"{student2} Total Marks", student2_data['Total (1170)'].values[0])
+                
+                with col2:
+                    st.metric(f"{student1} Merit", student1_data['Merit'].values[0])
+                    st.metric(f"{student2} Merit", student2_data['Merit'].values[0])
+                
+                with col3:
+                    if 'Status_Code' in student1_attendance.columns:
+                        attendance1 = student1_attendance['Status_Code'].mean() * 100
+                        attendance2 = student2_attendance['Status_Code'].mean() * 100
+                        st.metric(f"{student1} Attendance", f"{attendance1:.1f}%")
+                        st.metric(f"{student2} Attendance", f"{attendance2:.1f}%")
+                    else:
+                        st.metric(f"{student1} Attendance", "N/A")
+                        st.metric(f"{student2} Attendance", "N/A")
+                
+                with col4:
+                    if 'Gender' in student1_data.columns and 'Gender' in student2_data.columns:
+                        st.metric(f"{student1} Gender", student1_data['Gender'].values[0])
+                        st.metric(f"{student2} Gender", student2_data['Gender'].values[0])
+                    else:
+                        st.metric(f"{student1} Gender", "N/A")
+                        st.metric(f"{student2} Gender", "N/A")
+                
+                # Comparison charts
+                comparison_tab1, comparison_tab2 = st.tabs(["Performance Comparison", "Attendance Comparison"])
+                
+                with comparison_tab1:
+                    # Radar chart comparison
+                    fig = go.Figure()
+                    
+                    # Student 1 data
+                    values1 = [student1_data[f'{category}_Avg'].values[0] for category in assessment_categories]
+                    fig.add_trace(go.Scatterpolar(
+                        r=values1,
+                        theta=assessment_categories,
+                        fill='toself',
+                        name=student1
+                    ))
+                    
+                    # Student 2 data
+                    values2 = [student2_data[f'{category}_Avg'].values[0] for category in assessment_categories]
+                    fig.add_trace(go.Scatterpolar(
+                        r=values2,
+                        theta=assessment_categories,
+                        fill='toself',
+                        name=student2
+                    ))
+                    
+                    fig.update_layout(
+                        polar=dict(
+                            radialaxis=dict(
+                                visible=True,
+                                range=[0, 30]
+                            )),
+                        title="Performance Comparison Radar Chart",
+                        showlegend=True
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with comparison_tab2:
+                    if 'Status_Code' in student1_attendance.columns and 'Status_Code' in student2_attendance.columns:
+                        # Attendance comparison by day of week
+                        attendance_comparison = pd.DataFrame({
+                            'Day': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+                            student1: [student1_attendance[student1_attendance['Day_Name'] == day]['Status_Code'].mean() for day in 
+                                      ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']],
+                            student2: [student2_attendance[student2_attendance['Day_Name'] == day]['Status_Code'].mean() for day in 
+                                      ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']]
+                        })
+                        
+                        fig = px.bar(attendance_comparison, x='Day', y=[student1, student2], 
+                                    barmode='group', title="Attendance by Day of Week")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Attendance data not available for comparison.")
+        
+        # Tab 4: Attendance Analysis
+        with tab4:
+            st.header("Attendance Analysis")
+            
+            if 'Status_Code' in attendance_df.columns:
+                # Overall attendance by day of week
+                attendance_by_day = attendance_df.groupby('Day_Name')['Status_Code'].mean().reset_index()
+                # Order days properly
+                days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                attendance_by_day['Day_Name'] = pd.Categorical(attendance_by_day['Day_Name'], categories=days_order, ordered=True)
+                attendance_by_day = attendance_by_day.sort_values('Day_Name')
+                
+                fig = px.bar(attendance_by_day, x='Day_Name', y='Status_Code', 
+                            title="Overall Attendance by Day of Week", labels={'Status_Code': 'Attendance Rate'})
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Attendance by student
+                student_attendance = attendance_df.groupby('Name')['Status_Code'].mean().reset_index()
+                student_attendance = student_attendance.sort_values('Status_Code', ascending=False)
+                
+                fig = px.bar(student_attendance, x='Name', y='Status_Code', 
+                            title="Attendance Rate by Student", labels={'Status_Code': 'Attendance Rate'})
+                fig.update_xaxis(tickangle=45)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Attendance vs Performance correlation
+                performance_attendance = result_df.merge(student_attendance, on='Name')
+                fig = px.scatter(performance_attendance, x='Status_Code', y='Total (1170)', 
+                                trendline="ols", title="Attendance vs Performance Correlation",
+                                labels={'Status_Code': 'Attendance Rate', 'Total (1170)': 'Total Marks'})
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Attendance data not available for analysis.")
+        
+        # Tab 5: Performance Trends
+        with tab5:
+            st.header("Performance Trends Analysis")
+            
+            # Distribution of marks by assessment category
+            category_avgs = result_df[[f'{cat}_Avg' for cat in assessment_categories]]
+            category_avgs.columns = assessment_categories
+            
+            fig = px.box(category_avgs, title="Distribution of Marks by Assessment Category")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Correlation heatmap between assessment categories
+            corr_matrix = category_avgs.corr()
+            fig = px.imshow(corr_matrix, text_auto=True, aspect="auto", 
+                           title="Correlation Between Assessment Categories")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Top and bottom performers analysis
+            top5 = result_df.nlargest(5, 'Total (1170)')
+            bottom5 = result_df.nsmallest(5, 'Total (1170)')
+            
+            comparison_data = pd.concat([top5, bottom5])
+            comparison_data['Group'] = ['Top 5'] * 5 + ['Bottom 5'] * 5
+            
+            # Compare average marks in each category
+            comparison_avgs = []
+            for category in assessment_categories:
+                top_avg = top5[f'{category}_Avg'].mean()
+                bottom_avg = bottom5[f'{category}_Avg'].mean()
+                comparison_avgs.append({'Category': category, 'Top 5': top_avg, 'Bottom 5': bottom_avg})
+            
+            comparison_df = pd.DataFrame(comparison_avgs)
+            fig = px.bar(comparison_df, x='Category', y=['Top 5', 'Bottom 5'], barmode='group',
+                        title="Performance Comparison: Top 5 vs Bottom 5 Students")
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Please upload the result data CSV file to begin analysis.")
 
-# -----------------------------
-# Footer: Export & Download
-# -----------------------------
-st.markdown('---')
-if not attendance.empty:
-    if st.button('Download cleaned attendance CSV'):
-        csv = attendance.to_csv(index=False)
-        st.download_button('Click to download attendance CSV', data=csv, file_name='cleaned_attendance_export.csv')
-if not results.empty:
-    if st.button('Download cleaned results CSV'):
-        csv2 = results.to_csv(index=False)
-        st.download_button('Click to download results CSV', data=csv2, file_name='cleaned_results_export.csv')
-
-st.markdown('\n---\nBuilt with ❤️ — tell me what additional insights or visuals you want next!')
+if __name__ == "__main__":
+    main()
