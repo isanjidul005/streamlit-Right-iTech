@@ -9,55 +9,50 @@ st.set_page_config(page_title="Student Dashboard", layout="wide")
 # File readers
 # ----------------------------
 @st.cache_data
-def read_data_file(file):
-    """Read CSV or Excel files based on their MIME type and content."""
+def read_data_file(file, header=None):
+    """Read CSV or Excel files based on their MIME type, handling encoding errors."""
     file_type = file.type
     
-    # Check if the file name suggests a CSV file
+    file.seek(0)
+    
     if file_type == 'text/csv':
         try:
-            # Try reading with header=0, as per the new file structure
-            df = pd.read_csv(file, header=0)
-            return df
-        except pd.errors.ParserError:
-            # Fallback for messy CSVs
-            return pd.read_csv(file, header=None, encoding='latin1')
+            return pd.read_csv(file, header=header, encoding='utf-8')
+        except UnicodeDecodeError:
+            file.seek(0)
+            return pd.read_csv(file, header=header, encoding='latin1')
     elif file_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        return pd.read_excel(file)
+        return pd.read_excel(file, header=header)
     else:
         st.error(f"Unsupported file format: {file.name} (MIME type: {file_type})")
         return None
 
 def read_attendance_file(file, gender):
     """Read and clean attendance file, fix messy headers, tag gender"""
-    df_raw = read_data_file(file)
+    df_raw = read_data_file(file, header=None)
     if df_raw is None:
         return None
 
-    # The first row of your attendance files is not a header, so we re-read with header=None
-    file.seek(0)
-    df = pd.read_csv(file, header=None)
-
-    # Use the next row as the real header
-    df.columns = df.iloc[1]
-    df = df.drop([0, 1]).reset_index(drop=True)
-    df.columns = df.columns.astype(str)
+    # Use the second row as the real header
+    df = df_raw.iloc[1:].copy()
+    df.columns = df_raw.iloc[0]
     
-    # Standardize column names
-    cols = list(df.columns)
-    if not ('ID' in cols and 'Roll' in cols and 'Name' in cols):
-        df.rename(columns={cols[0]: "ID", cols[1]: "Roll", cols[2]: "Name"}, inplace=True)
-
+    # Standardize column names by stripping spaces
+    df.columns = df.columns.astype(str).str.strip()
+    
+    # Rename columns to ensure consistency
+    df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Roll', df.columns[2]: 'Name'}, inplace=True)
+    
     df["Gender"] = gender
     return df
 
 def read_score_file(file):
-    """Read and clean score file based on the user's description."""
-    df = read_data_file(file)
+    """Read and clean score file with single-row header"""
+    df = read_data_file(file, header=0)
     if df is None:
         return None
     
-    # Standardize column names
+    # Standardize column names to remove extra spaces
     df.columns = df.columns.astype(str).str.strip()
     
     # Check for required columns
@@ -103,7 +98,7 @@ def main():
             lambda x: 1 if str(x).strip().upper().startswith("✔") or str(x).strip().upper() == "P" else 0
         )
 
-        # Attendance summary per student - including 'Roll' in the groupby
+        # Attendance summary per student
         attendance_summary = (
             attendance_long.groupby(["ID", "Name", "Roll", "Gender"])["Present"]
             .mean()
@@ -112,7 +107,6 @@ def main():
         attendance_summary.rename(columns={"Present": "AttendanceRate"}, inplace=True)
 
         # Process scores file
-        # Identify WMT columns based on the 'WMT' string
         score_columns = [col for col in score_df.columns if 'WMT' in col.upper()]
         
         # Melt scores into long format
