@@ -8,36 +8,34 @@ st.set_page_config(page_title="Student Dashboard", layout="wide")
 # ----------------------------
 # File readers
 # ----------------------------
-def read_data_file(file, header_row):
-    """Read CSV or Excel files with a specific header row."""
-    file_extension = file.name.split('.')[-1].lower()
-    if file_extension == 'csv':
-        df = pd.read_csv(file, header=header_row)
-    elif file_extension in ['xlsx', 'xls']:
-        df = pd.read_excel(file, header=header_row)
+@st.cache_data
+def read_data_file(file, header=None):
+    """Read CSV or Excel files based on their MIME type."""
+    file_type = file.type
+    
+    if file_type == 'text/csv':
+        return pd.read_csv(file, header=header)
+    elif file_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        return pd.read_excel(file, header=header)
     else:
-        st.error(f"Unsupported file format: {file.name}")
+        st.error(f"Unsupported file format: {file.name} (MIME type: {file_type})")
         return None
-    return df
 
 def read_attendance_file(file, gender):
     """Read and clean attendance file, fix messy headers, tag gender"""
     df_raw = read_data_file(file, header=None)
+    if df_raw is None:
+        return None
 
     # Drop the first row (report title)
     df = df_raw.drop(0).reset_index(drop=True)
-
-    # Use the next row as header
     df.columns = df.iloc[0]
     df = df.drop(0).reset_index(drop=True)
     df.columns = df.columns.astype(str)
-
-    # If headers are still messy -> fix manually
+    
+    # Standardize column names
     cols = list(df.columns)
-    if all(str(c).startswith("Unnamed") or pd.isna(c) for c in cols):
-        new_cols = ["ID", "Roll", "Name"] + [f"Day{i}" for i in range(1, len(cols)-2+1)]
-        df.columns = new_cols
-    else:
+    if 'ID' not in cols or 'Roll' not in cols or 'Name' not in cols:
         df.rename(columns={cols[0]: "ID", cols[1]: "Roll", cols[2]: "Name"}, inplace=True)
 
     df["Gender"] = gender
@@ -46,7 +44,9 @@ def read_attendance_file(file, gender):
 def read_score_file(file):
     """Read and clean score file with single-row header"""
     df = read_data_file(file, header=0)
-    
+    if df is None:
+        return None
+        
     # Standardize column names to remove extra spaces
     df.columns = df.columns.astype(str).str.strip()
     
