@@ -31,8 +31,19 @@ def read_attendance_file(file, gender):
     return df
 
 def read_score_file(file):
-    """Read score file normally"""
-    return pd.read_excel(file)
+    """Read and clean score file with messy headers"""
+    df_raw = pd.read_excel(file, header=None)
+    
+    # Use the second row as header
+    df = df_raw.drop(0).reset_index(drop=True)
+    df.columns = df.iloc[0]
+    df = df.drop(0).reset_index(drop=True)
+    
+    # Standardize column names
+    df.columns = df.columns.astype(str).str.strip().str.lower()
+    df.rename(columns={'id': 'ID', 'roll': 'Roll', 'name': 'Name'}, inplace=True)
+    
+    return df
 
 # ----------------------------
 # Dashboard
@@ -63,7 +74,7 @@ def main():
 
         # Clean up attendance (P = present, A = absent, etc.)
         attendance_long["Present"] = attendance_long["Status"].apply(
-            lambda x: 1 if str(x).strip().upper() == "P" else 0
+            lambda x: 1 if str(x).strip().upper().startswith("✔") or str(x).strip().upper() == "P" else 0
         )
 
         # Attendance summary per student
@@ -74,9 +85,27 @@ def main():
         )
         attendance_summary.rename(columns={"Present": "AttendanceRate"}, inplace=True)
 
+        # Process scores file
+        score_df.columns = score_df.columns.str.lower()
+        score_columns = [col for col in score_df.columns if 'wmt' in col]
+        
+        # Melt scores into long format
+        score_long = score_df.melt(
+            id_vars=['id', 'roll', 'name'],
+            value_vars=score_columns,
+            var_name='WMT',
+            value_name='Score'
+        )
+        
+        # Clean score data and convert to numeric, handling 'ab'
+        score_long['Score'] = pd.to_numeric(
+            score_long['Score'].astype(str).str.extract(r'(\d+\.?\d*)').fillna('0'),
+            errors='coerce'
+        ).fillna(0)
+
         # Merge with scores
         combined = pd.merge(
-            score_df,
+            score_long,
             attendance_summary,
             how="left",
             on=["ID", "Name"]
@@ -85,7 +114,7 @@ def main():
         # ---------------- Overview ----------------
         st.header("📍 Overview")
         col1, col2, col3 = st.columns(3)
-        col1.metric("Total Students", len(combined))
+        col1.metric("Total Students", len(combined['ID'].unique()))
         col2.metric("Avg Score", f"{combined['Score'].mean():.2f}")
         col3.metric("Avg Attendance", f"{combined['AttendanceRate'].mean()*100:.1f}%")
 
