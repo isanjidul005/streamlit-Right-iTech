@@ -53,14 +53,15 @@ if uploaded_att and uploaded_marks:
     # Marks summary per student
     marks_clean = marks.copy()
     marks_clean["Marks"] = pd.to_numeric(marks_clean["Marks"], errors="coerce")
+
     marks_summary = (
-        marks_clean.groupby(["ID", "Name", "Gender"])
+        marks_clean.groupby(["ID", "Name"])  # 👈 FIXED: no Gender here
         .agg(avg_marks=("Marks", "mean"))
         .reset_index()
     )
 
     # Merge both
-    merged = pd.merge(attendance_summary, marks_summary, on=["ID", "Name", "Gender"])
+    merged = pd.merge(attendance_summary, marks_summary, on=["ID", "Name"], how="left")
 
     # -------------------------
     # Tabs
@@ -186,8 +187,11 @@ if uploaded_att and uploaded_marks:
 
         # KMeans clustering
         X = merged[["attendance_rate", "avg_marks"]].dropna()
-        kmeans = KMeans(n_clusters=3, random_state=42).fit(X)
-        merged["cluster"] = kmeans.labels_
+        if len(X) >= 3:  # ensure enough students
+            kmeans = KMeans(n_clusters=3, random_state=42).fit(X)
+            merged["cluster"] = kmeans.labels_
+        else:
+            merged["cluster"] = 0
 
         fig = px.scatter(
             merged, x="attendance_rate", y="avg_marks", color="cluster",
