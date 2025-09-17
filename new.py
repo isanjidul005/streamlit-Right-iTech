@@ -163,7 +163,7 @@ def process_uploaded_files(attendance_files, score_file):
     # Clean score data and convert to numeric
     for col in score_columns:
         score_df[col] = pd.to_numeric(
-            score_df[col].astype(str).str.extract('(\d+\.?\d*)').fillna('0'), # Extract numeric values
+            score_df[col].astype(str).str.extract(r'(\d+\.?\d*)').fillna('0'), # Extract numeric values
             errors='coerce'
         ).fillna(0)
     
