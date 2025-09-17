@@ -4,8 +4,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
-import calendar
 import io
+import re
 
 # Set page configuration
 st.set_page_config(
@@ -27,192 +27,297 @@ def load_css():
 
 load_css()
 
-# Function to read both CSV and Excel files
-def read_data_file(file):
-    """Read CSV or Excel files and return DataFrame"""
+# ---------- Helper functions ----------
+
+def safe_read_csv(file):
+    # Reset pointer then read
     try:
-        # Streamlit file_uploader provides file-like object
-        file_extension = file.name.split('.')[-1].lower()
-        if file_extension == 'csv':
-            # Specify skiprows to read the correct header row
-            return pd.read_csv(file, skiprows=1)
-        elif file_extension in ['xlsx', 'xls']:
-            # Specify skiprows to read the correct header row
-            return pd.read_excel(file, skiprows=1)
+        file.seek(0)
+    except Exception:
+        pass
+    return pd.read_csv(file)
+
+def safe_read_excel(file):
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    return pd.read_excel(file)
+
+def read_data_file(file):
+    """Read CSV or Excel files and return DataFrame. More flexible header handling."""
+    try:
+        # file might be UploadedFile or path-like object with .name
+        fname = getattr(file, "name", str(file))
+        ext = fname.split('.')[-1].lower()
+        # Some files may have header on first row; avoid forcing skiprows=1 unconditionally.
+        if ext == 'csv':
+            try:
+                df = safe_read_csv(file)
+            except Exception as e:
+                # try with different encodings / engine fallback
+                df = pd.read_csv(file, engine='python', error_bad_lines=False)
+            return df
+        elif ext in ['xlsx', 'xls']:
+            df = safe_read_excel(file)
+            return df
         else:
-            st.error(f"Unsupported file format: {file.name}")
+            st.error(f"Unsupported file format: {fname}")
             return None
     except Exception as e:
-        st.error(f"Error reading file {file.name}: {str(e)}")
+        st.error(f"Error reading file {getattr(file,'name',str(file))}: {str(e)}")
         return None
 
-# File upload and data processing
+def is_date_like(value):
+    """Return True if value (string/object) can be parsed as a date."""
+    try:
+        # Pandas is quite flexible
+        parsed = pd.to_datetime(value, errors='coerce')
+        return not pd.isna(parsed)
+    except Exception:
+        return False
+
+def natural_wmt_key(wmt):
+    """Extract numeric part from WMT like 'WMT W1 [30]' or 'W1' to allow better ordering."""
+    if pd.isna(wmt):
+        return 0
+    s = str(wmt)
+    m = re.search(r'(\d+)', s)
+    return int(m.group(1)) if m else 0
+
+def standardize_status(raw):
+    """Normalize a variety of attendance status representations into 'Present'/'Absent'/np.nan"""
+    if pd.isna(raw):
+        return np.nan
+    s = str(raw).strip()
+    # common symbols
+    if '✔' in s or s.lower().startswith('p') or re.match(r'^[1]\b', s):
+        return 'Present'
+    if '✘' in s or s.lower().startswith('a') or re.match(r'^[0]\b', s):
+        return 'Absent'
+    # words
+    if re.search(r'present', s, re.IGNORECASE):
+        return 'Present'
+    if re.search(r'absent', s, re.IGNORECASE):
+        return 'Absent'
+    # fallback: if contains non-empty cell and not clearly absent, treat as Present
+    if s != '' and s.lower() not in ['nan', 'none', '']:
+        return 'Present'
+    return np.nan
+
+# ---------- Data processing (cached) ----------
+
 @st.cache_data
 def process_uploaded_files(attendance_files, score_file):
-    # Process attendance files
+    # attendance_files: list of UploadedFile
     attendance_dfs = []
     
     for file in attendance_files:
         df = read_data_file(file)
         if df is None:
             continue
-            
-        # Convert all column names to strings
+
+        # Ensure columns are strings
         df.columns = df.columns.astype(str)
 
-        # Standardize column names based on file format
+        # If ID/Name are missing, try rename heuristically
         if 'ID' not in df.columns or 'Name' not in df.columns:
-            st.warning(f"Could not find ID/Name columns in {file.name}. Using first three columns.")
+            st.warning(f"Could not find ID/Name columns in {file.name}. Trying to infer.")
             if len(df.columns) >= 3:
-                # Assuming ID, Roll, and Name are the first three columns
-                df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Roll', df.columns[2]: 'Name'}, inplace=True)
+                df = df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Roll', df.columns[2]: 'Name'})
+            elif len(df.columns) >= 2:
+                df = df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Name'})
             else:
-                st.error(f"File {file.name} doesn't have enough columns")
+                st.error(f"File {file.name} doesn't have enough columns.")
                 continue
-        
-        # Try to detect gender from filename or add unknown
-        file_name = file.name.lower()
-        if 'boy' in file_name or 'male' in file_name:
-            df['Gender'] = 'Boy'
-        elif 'girl' in file_name or 'female' in file_name:
-            df['Gender'] = 'Girl'
-        else:
-            df['Gender'] = 'Unknown'
-            
-        attendance_dfs.append(df)
-    
-    if not attendance_dfs:
-        st.error("No valid attendance files were processed")
-        return None, None, None
-    
-    # Combine all attendance data
-    attendance = pd.concat(attendance_dfs, ignore_index=True)
-    
-    # Clean attendance data - identify date columns
-    non_date_columns = ['ID', 'Name', 'Gender', 'Roll']
-    date_columns = [col for col in attendance.columns if col not in non_date_columns]
 
-    # Check if date_columns is empty before proceeding
-    if not date_columns:
-        st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
+        # Ensure 'Roll' column exists for consistency (may be absent)
+        if 'Roll' not in df.columns:
+            df['Roll'] = np.nan
+
+        # Detect date-like columns:
+        non_date_candidates = {'ID', 'Name', 'Gender', 'Roll'}
+        # Treat columns as date columns if the column name itself can be parsed as date
+        date_columns = []
+        for col in df.columns:
+            if col in non_date_candidates:
+                continue
+            if is_date_like(col):
+                date_columns.append(col)
+                continue
+            # if header isn't a date-like string, check first few values for checkmarks / P/A patterns
+            sample_vals = df[col].dropna().astype(str).head(10).tolist()
+            # if sample contains checkmarks or P/A or Present/Absent text -> treat as date column
+            if any(re.search(r'✔|✘|\bP\b|\bA\b|Present|Absent', v, re.IGNORECASE) for v in sample_vals):
+                date_columns.append(col)
+
+        # If still nothing, try assume all columns after Name/ID are dates
+        if not date_columns:
+            possible = [c for c in df.columns if c not in non_date_candidates]
+            if possible:
+                date_columns = possible
+
+        # Try to set Gender by filename if possible
+        fname = file.name.lower()
+        if 'boy' in fname or 'male' in fname:
+            df['Gender'] = 'Boy'
+        elif 'girl' in fname or 'female' in fname:
+            df['Gender'] = 'Girl'
+        elif 'b' in fname and 'g' not in fname and 'boy' in fname:  # fallback
+            df['Gender'] = 'Boy'
+        else:
+            # keep existing Gender if available, otherwise Unknown
+            if 'Gender' not in df.columns:
+                df['Gender'] = 'Unknown'
+            else:
+                df['Gender'] = df['Gender'].fillna('Unknown')
+
+        # Keep only the relevant columns (ID, Roll, Name, Gender + date columns)
+        keep_cols = ['ID', 'Roll', 'Name', 'Gender'] + date_columns
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        attendance_dfs.append(df)
+
+    if not attendance_dfs:
         return None, None, None
-    
-    # Melt attendance data to long format
+
+    attendance = pd.concat(attendance_dfs, ignore_index=True)
+
+    # Identify non-date columns and date columns again for combined df
+    non_date_columns = ['ID', 'Roll', 'Name', 'Gender']
+    candidate_date_columns = [c for c in attendance.columns if c not in non_date_columns]
+
+    if not candidate_date_columns:
+        return None, None, None
+
+    # Melt attendance into long format
     attendance_long = attendance.melt(
         id_vars=['ID', 'Roll', 'Name', 'Gender'],
-        value_vars=date_columns,
+        value_vars=candidate_date_columns,
         var_name='Date',
-        value_name='Status'
+        value_name='RawStatus'
     )
-    
-    # Clean the 'Status' column from values like '✔ 10' or '✘ 1'
-    attendance_long['Status'] = attendance_long['Status'].astype(str).str.strip()
-    attendance_long['Status'] = attendance_long['Status'].str.extract(r'(✔|✘)')
-    attendance_long['Status'] = attendance_long['Status'].replace({'✔': 'Present', '✘': 'Absent'})
 
-    # Convert the 'Date' column to a proper datetime format
-    attendance_long['Date'] = pd.to_datetime(attendance_long['Date'], format='%b %d %a', errors='coerce')
-    
-    attendance_long.dropna(subset=['Date'], inplace=True)
-    
- # Process score file
-score_df = read_data_file(score_file)
-print(score_df.head()) # <--- ADD THIS LINE
-if score_df is None:
-    return None, None, None
-    
-    # Convert all score column names to strings as well
-    score_df.columns = score_df.columns.astype(str)
-    
-    # Explicitly check for ID and Name.
-    if 'ID' not in score_df.columns or 'Name' not in score_df.columns:
-        st.warning(f"Could not find ID/Name columns in score file. Renaming the first and third columns.")
-        if len(score_df.columns) >= 3:
-            # Assuming ID and Name are the first and third columns
-            score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[2]: 'Name'}, inplace=True)
-        else:
-            st.error("Score file doesn't have enough columns")
-            return None, None, None
-            
-    # Drop "Total" and "Merit" columns as they are not needed for melting
-    score_df = score_df.drop(columns=[col for col in score_df.columns if 'Total' in col or 'Merit' in col], errors='ignore')
+    # Standardize status values
+    attendance_long['Status'] = attendance_long['RawStatus'].apply(standardize_status)
 
-    # Identify score columns (non-ID and non-Name columns)
-    score_columns = [col for col in score_df.columns if col not in ['ID', 'Name', 'Roll']]
-    
-    # Check if score_columns is empty before proceeding
-    if not score_columns:
-        st.error("Could not identify score columns. Please ensure your score file has score data.")
+    # Try parse Date column robustly:
+    # If Date column values are strings like 'Jan 1 Wed' or real datetimes, try flexible parsing
+    # First try parse column headings (they were used as var_name)
+    attendance_long['Date_parsed'] = pd.to_datetime(attendance_long['Date'], errors='coerce', dayfirst=False)
+
+    # For any rows still NaT, try to parse using more flexible strategies (e.g., if Date is e.g., 'Jan 01 (Wed)')
+    mask_na = attendance_long['Date_parsed'].isna()
+    if mask_na.any():
+        # try to clean string and parse again
+        def try_parse_date_str(s):
+            try:
+                s = str(s)
+                # remove bracketed parts
+                s = re.sub(r'[\(\)\[\]]', ' ', s)
+                s = re.sub(r'\s+', ' ', s).strip()
+                return pd.to_datetime(s, errors='coerce', dayfirst=False)
+            except Exception:
+                return pd.NaT
+        attendance_long.loc[mask_na, 'Date_parsed'] = attendance_long.loc[mask_na, 'Date'].apply(try_parse_date_str)
+
+    # Drop rows without parsed dates or without status
+    attendance_long = attendance_long.dropna(subset=['Date_parsed', 'Status'])
+
+    # Rename date column
+    attendance_long = attendance_long.rename(columns={'Date_parsed': 'Date'}).drop(columns=['RawStatus', 'Date'])
+
+    # Normalize column types
+    attendance_long['ID'] = attendance_long['ID'].astype(str).str.strip()
+    attendance_long['Name'] = attendance_long['Name'].astype(str).str.strip()
+
+    # ---------------- Score file ----------------
+    score_df = read_data_file(score_file)
+    if score_df is None:
         return None, None, None
 
-    # Clean score data and convert to numeric
+    # Convert columns to string names
+    score_df.columns = score_df.columns.astype(str)
+
+    # If ID/Name missing attempt heuristics
+    if 'ID' not in score_df.columns or 'Name' not in score_df.columns:
+        st.warning(f"Could not find ID/Name columns in score file. Trying to infer.")
+        if len(score_df.columns) >= 3:
+            score_df = score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[2]: 'Name'})
+        elif len(score_df.columns) >= 2:
+            score_df = score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[1]: 'Name'})
+        else:
+            return None, None, None
+
+    score_df['ID'] = score_df['ID'].astype(str).str.strip()
+    score_df['Name'] = score_df['Name'].astype(str).str.strip()
+
+    # Drop irrelevant columns (Total, Merit)
+    score_df = score_df.drop(columns=[col for col in score_df.columns if re.search(r'\bTotal\b|\bMerit\b', col, re.IGNORECASE)], errors='ignore')
+
+    # Determine score columns
+    score_columns = [c for c in score_df.columns if c not in ['ID', 'Name', 'Roll']]
+
+    if not score_columns:
+        return None, None, None
+
+    # Clean score columns -> numeric
     for col in score_columns:
-        score_df[col] = pd.to_numeric(
-            score_df[col].astype(str).str.extract(r'(\d+\.?\d*)').fillna('0'), # Extract numeric values
-            errors='coerce'
-        ).fillna(0)
-    
-    # Melt score data to long format
-    wmt_long = score_df.melt(
-        id_vars=['ID', 'Name'],
-        value_vars=score_columns,
-        var_name='WMT',
-        value_name='Score'
-    )
-    
-    # Merge data
+        # Extract the first numeric token (allow decimals)
+        score_df[col] = pd.to_numeric(score_df[col].astype(str).str.extract(r'(-?\d+\.?\d*)', expand=False).fillna(0), errors='coerce').fillna(0)
+
+    # Melt scores to long format
+    wmt_long = score_df.melt(id_vars=['ID', 'Name'], value_vars=score_columns, var_name='WMT', value_name='Score')
+
+    # Merge attendance and scores on ID + Name
     merged_df = pd.merge(wmt_long, attendance_long, on=['ID', 'Name'], how='outer')
-    
+
+    # Ensure Date column is dtype datetime
+    merged_df['Date'] = pd.to_datetime(merged_df['Date'], errors='coerce')
+
     return merged_df, score_df, attendance_long
 
-# Main app
+# ---------- Main App UI ----------
+
 def main():
     st.title("📊 Student Performance Dashboard")
-    
-    # File upload section
+
     st.sidebar.header("Upload Files")
-    
-    # Upload attendance files
+
     attendance_files = st.sidebar.file_uploader(
         "Upload Attendance Files",
         type=['csv', 'xlsx', 'xls'],
         accept_multiple_files=True,
         help="Upload one or more attendance files (CSV or Excel)"
     )
-    
-    # Upload score file
+
     score_file = st.sidebar.file_uploader(
         "Upload WMT Scores File",
         type=['csv', 'xlsx', 'xls'],
         help="Upload the WMT scores file (CSV or Excel)"
     )
-    
-    # Check if files are uploaded
+
+    # If the user previously uploaded files via the developer console (local paths), they aren't accessible here.
     if not attendance_files:
         st.info("👆 Please upload attendance files to begin")
         st.stop()
-    
+
     if not score_file:
         st.info("👆 Please upload WMT scores file to begin")
         st.stop()
-    
-    # Process files
+
     with st.spinner("Processing your files..."):
         try:
             df, wmt_scores, attendance_long = process_uploaded_files(attendance_files, score_file)
-            
             if df is None:
-                st.error("Failed to process files. Please check your file formats.")
+                st.error("Failed to process files. Please check your file formats and headers.")
                 st.stop()
-                
         except Exception as e:
             st.error(f"Error processing files: {str(e)}")
             st.stop()
-    
-    # Show success message
+
     st.success(f"✅ Successfully processed {len(attendance_files)} attendance files and 1 score file")
-    
-    # Display data preview
+
     with st.expander("View Raw Data Preview"):
         col1, col2 = st.columns(2)
         with col1:
@@ -221,293 +326,257 @@ def main():
         with col2:
             st.write("**Score Data Preview:**")
             st.dataframe(wmt_scores.head())
-    
-    # Sidebar configuration
+
     st.sidebar.header("Dashboard Controls")
     section = st.sidebar.radio("Select Section", ["Class Overview", "Student Comparison", "Individual Student Dashboard"])
-    
+
     # Global filters
     st.sidebar.subheader("Global Filters")
-    gender_options = ['All'] + list(df['Gender'].unique())
+    gender_options = ['All'] + sorted(df['Gender'].dropna().unique().astype(str).tolist())
     gender_filter = st.sidebar.selectbox("Select Gender", gender_options)
-    
-    # Handle date range with proper validation
+
+    # Date range safe handling
     try:
-        min_date = df['Date'].min().date()
-        max_date = df['Date'].max().date()
-        
-        # Ensure dates are valid (not NaT)
+        min_date = df['Date'].min()
+        max_date = df['Date'].max()
         if pd.isna(min_date) or pd.isna(max_date):
-            st.error("Invalid date range detected. Please check your attendance data.")
             min_date = date.today()
             max_date = date.today()
-    except:
+        else:
+            min_date = min_date.date()
+            max_date = max_date.date()
+    except Exception:
         min_date = date.today()
         max_date = date.today()
-    
+
     date_range = st.sidebar.date_input("Select Date Range", [min_date, max_date])
-    
-    # Filter data based on global filters
+
+    # Filter data
     filtered_df = df.copy()
     if gender_filter != 'All':
         filtered_df = filtered_df[filtered_df['Gender'] == gender_filter]
-    if len(date_range) == 2:
-        filtered_df = filtered_df[(filtered_df['Date'].dt.date >= date_range[0]) & 
-                                 (filtered_df['Date'].dt.date <= date_range[1])]
-    
-    # Section 1: Class Overview Dashboard
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start, end = date_range
+        # ensure Date column is datetime
+        filtered_df = filtered_df[(filtered_df['Date'].dt.date >= start) & (filtered_df['Date'].dt.date <= end)]
+
+    # ----------------- Class Overview -----------------
     if section == "Class Overview":
         st.header("Class Overview Dashboard")
-        
-        # WMT selector
-        wmt_options = sorted(filtered_df['WMT'].unique())
+
+        wmt_options = [w for w in sorted(filtered_df['WMT'].dropna().unique(), key=natural_wmt_key)]
         if not wmt_options:
             st.error("No WMT columns found in the score data.")
             st.stop()
-            
+
         selected_wmt = st.selectbox("Select WMT", wmt_options)
-        
-        # Calculate metrics
+
         wmt_data = filtered_df[filtered_df['WMT'] == selected_wmt]
-        if len(wmt_data) == 0:
-            st.warning(f"No data available for {selected_wmt}")
+        if wmt_data.empty:
             avg_score = 0
             pass_rate = 0
+            st.warning(f"No data available for {selected_wmt}")
         else:
             avg_score = wmt_data['Score'].mean()
             pass_count = wmt_data[wmt_data['Score'] >= 50]['Score'].count()
             pass_rate = (pass_count / len(wmt_data)) * 100 if len(wmt_data) > 0 else 0
-        
-        attendance_rate = (filtered_df[filtered_df['Status'] == 'Present'].shape[0] / 
-                          filtered_df.shape[0]) * 100 if filtered_df.shape[0] > 0 else 0
-        
-        # Display metrics
+
+        attendance_rate = (filtered_df[filtered_df['Status'] == 'Present'].shape[0] / filtered_df.shape[0]) * 100 if filtered_df.shape[0] > 0 else 0
+
         col1, col2, col3 = st.columns(3)
         col1.metric("Average Score", f"{avg_score:.2f}")
         col2.metric("Pass Rate", f"{pass_rate:.2f}%")
         col3.metric("Attendance Rate", f"{attendance_rate:.2f}%")
-        
-        # Score distribution
+
         st.subheader("Score Distribution")
-        if len(wmt_data) > 0:
+        if not wmt_data.empty:
             fig_hist = px.histogram(wmt_data, x="Score", nbins=20, title=f"Score Distribution for {selected_wmt}")
             st.plotly_chart(fig_hist, use_container_width=True)
         else:
             st.info("No score data available for the selected WMT")
-        
-        # Top and bottom performers
+
         st.subheader("Top and Bottom Performers")
-        if len(wmt_data) > 0:
-            # Drop duplicates to ensure each student is counted once per WMT
+        if not wmt_data.empty:
             wmt_data_unique = wmt_data.drop_duplicates(subset=['Name'])
-            
             top_10 = wmt_data_unique.nlargest(min(10, len(wmt_data_unique)), 'Score')
             bottom_10 = wmt_data_unique.nsmallest(min(10, len(wmt_data_unique)), 'Score')
-            
+
             fig_top = px.bar(top_10, x='Name', y='Score', title="Top Performers")
             fig_bottom = px.bar(bottom_10, x='Name', y='Score', title="Bottom Performers")
-            
+
             col1, col2 = st.columns(2)
             col1.plotly_chart(fig_top, use_container_width=True)
             col2.plotly_chart(fig_bottom, use_container_width=True)
         else:
             st.info("No score data available for performance comparison")
-        
-        # Attendance over time
+
         st.subheader("Attendance Rate Over Time")
-        if len(filtered_df) > 0:
-            daily_attendance = filtered_df.groupby('Date')['Status'].apply(
-                lambda x: (x == 'Present').sum() / x.count() * 100 if x.count() > 0 else 0
-            ).reset_index(name='Attendance Rate')
-            
-            fig_att = px.line(daily_attendance, x='Date', y='Attendance Rate', 
-                             title="Daily Attendance Rate")
+        if not filtered_df.empty:
+            daily_attendance = filtered_df.groupby(filtered_df['Date'].dt.date)['Status'].apply(lambda x: (x == 'Present').sum() / x.count() * 100 if x.count() > 0 else 0).reset_index(name='Attendance Rate')
+            daily_attendance['Date'] = pd.to_datetime(daily_attendance['Date'])
+            fig_att = px.line(daily_attendance, x='Date', y='Attendance Rate', title="Daily Attendance Rate")
             st.plotly_chart(fig_att, use_container_width=True)
         else:
             st.info("No attendance data available")
-        
-        # Early intervention flagging
+
         st.subheader("Students Needing Attention")
-        if len(filtered_df) > 0:
+        if not filtered_df.empty:
+            # compute per-student averages and attendance
             student_stats = filtered_df.groupby(['Name', 'WMT']).agg({
                 'Score': 'mean',
                 'Status': lambda x: (x == 'Present').mean() * 100
             }).reset_index()
-            
-            # Identify students with declining scores
+
+            # declining score detection (simple heuristic based on WMT numeric ordering)
             declining_students = []
             for name in student_stats['Name'].unique():
-                student_data = student_stats[student_stats['Name'] == name].sort_values('WMT')
-                if len(student_data) > 2 and student_data['Score'].is_monotonic_decreasing:
-                    declining_students.append(name)
-            
-            # Identify low attendance
+                sd = student_stats[student_stats['Name'] == name].copy()
+                sd = sd.sort_values(by='WMT', key=lambda col: col.map(natural_wmt_key))
+                if len(sd) > 2:
+                    # check if scores strictly decrease across WMTs (simple)
+                    if sd['Score'].is_monotonic_decreasing:
+                        declining_students.append(name)
+
             low_attendance = student_stats[student_stats['Status'] < 75]['Name'].unique()
-            
-            if len(declining_students) > 0:
-                st.write("**Students with declining scores:**", ", ".join(declining_students[:5]))
+
+            if declining_students:
+                st.write("**Students with declining scores:**", ", ".join(declining_students[:10]))
             else:
                 st.write("No students with declining scores found.")
-                
+
             if len(low_attendance) > 0:
-                st.write("**Students with low attendance:**", ", ".join(low_attendance[:5]))
+                st.write("**Students with low attendance:**", ", ".join(low_attendance[:10]))
             else:
                 st.write("No students with low attendance found.")
         else:
             st.info("No data available for student analysis")
-    
-    # Section 2: Student Comparison Dashboard
+
+    # ----------------- Student Comparison -----------------
     elif section == "Student Comparison":
         st.header("Student Comparison Dashboard")
-        
-        # Student selection
-        student_list = sorted(filtered_df['Name'].unique())
-        if len(student_list) == 0:
+
+        student_list = sorted(filtered_df['Name'].dropna().unique())
+        if not student_list:
             st.error("No students found in the filtered data")
             st.stop()
-            
+
         col1, col2 = st.columns(2)
         student1 = col1.selectbox("Select Student 1", student_list)
-        student2 = col2.selectbox("Select Student 2", student_list)
-        
-        # Filter data for selected students
+        student2 = col2.selectbox("Select Student 2", student_list, index=1 if len(student_list) > 1 else 0)
+
         student1_data = filtered_df[filtered_df['Name'] == student1]
         student2_data = filtered_df[filtered_df['Name'] == student2]
-        
-        # Score trend comparison
+
         st.subheader("Score Trend Comparison")
-        if len(student1_data) > 0 or len(student2_data) > 0:
+        if not student1_data.empty or not student2_data.empty:
             fig_trend = go.Figure()
-            
-            if len(student1_data) > 0:
-                student1_scores = student1_data.groupby('WMT')['Score'].mean().reset_index()
-                fig_trend.add_trace(go.Scatter(
-                    x=student1_scores['WMT'],
-                    y=student1_scores['Score'],
-                    name=student1
-                ))
-            
-            if len(student2_data) > 0:
-                student2_scores = student2_data.groupby('WMT')['Score'].mean().reset_index()
-                fig_trend.add_trace(go.Scatter(
-                    x=student2_scores['WMT'],
-                    y=student2_scores['Score'],
-                    name=student2
-                ))
-            
+            if not student1_data.empty:
+                s1 = student1_data.groupby('WMT')['Score'].mean().reset_index().sort_values(by='WMT', key=lambda col: col.map(natural_wmt_key))
+                fig_trend.add_trace(go.Scatter(x=s1['WMT'], y=s1['Score'], name=student1))
+            if not student2_data.empty:
+                s2 = student2_data.groupby('WMT')['Score'].mean().reset_index().sort_values(by='WMT', key=lambda col: col.map(natural_wmt_key))
+                fig_trend.add_trace(go.Scatter(x=s2['WMT'], y=s2['Score'], name=student2))
             st.plotly_chart(fig_trend, use_container_width=True)
         else:
             st.info("No score data available for comparison")
-        
-        # Attendance vs Score scatter plot
+
         st.subheader("Attendance vs Performance")
-        if len(filtered_df) > 0:
+        if not filtered_df.empty:
             scatter_data = filtered_df.groupby('Name').agg({
                 'Score': 'mean',
                 'Status': lambda x: (x == 'Present').mean() * 100
             }).reset_index()
-            
-            fig_scatter = px.scatter(scatter_data, x='Status', y='Score', hover_data=['Name'])
-            # Highlight selected students
-            if student1 in scatter_data['Name'].values:
-                fig_scatter.add_trace(go.Scatter(
-                    x=scatter_data[scatter_data['Name'] == student1]['Status'],
-                    y=scatter_data[scatter_data['Name'] == student1]['Score'],
-                    mode='markers', marker=dict(size=15, color='red'), name=student1
-                ))
-            
-            if student2 in scatter_data['Name'].values:
-                fig_scatter.add_trace(go.Scatter(
-                    x=scatter_data[scatter_data['Name'] == student2]['Status'],
-                    y=scatter_data[scatter_data['Name'] == student2]['Score'],
-                    mode='markers', marker=dict(size=15, color='blue'), name=student2
-                ))
-            
+            fig_scatter = px.scatter(scatter_data, x='Status', y='Score', hover_data=['Name'], title="Attendance % vs Avg Score")
+
+            # Highlight selected students (add bigger markers)
+            for stud, color in [(student1, 'red'), (student2, 'blue')]:
+                if stud in scatter_data['Name'].values:
+                    s = scatter_data[scatter_data['Name'] == stud]
+                    fig_scatter.add_trace(go.Scatter(
+                        x=s['Status'], y=s['Score'],
+                        mode='markers',
+                        marker=dict(size=14, line=dict(width=2)),
+                        name=stud,
+                        hoverinfo='name+x+y'
+                    ))
+
             st.plotly_chart(fig_scatter, use_container_width=True)
         else:
             st.info("No data available for scatter plot")
-        
-        # Performance table
+
         st.subheader("Performance Comparison")
         comparison_data = {
             'Metric': ['Average Score', 'Median Score', 'Attendance Rate'],
             student1: [
-                student1_data['Score'].mean() if len(student1_data) > 0 else 0,
-                student1_data['Score'].median() if len(student1_data) > 0 else 0,
-                (student1_data['Status'] == 'Present').mean() * 100 if len(student1_data) > 0 else 0
+                student1_data['Score'].mean() if not student1_data.empty else 0,
+                student1_data['Score'].median() if not student1_data.empty else 0,
+                (student1_data['Status'] == 'Present').mean() * 100 if not student1_data.empty else 0
             ],
             student2: [
-                student2_data['Score'].mean() if len(student2_data) > 0 else 0,
-                student2_data['Score'].median() if len(student2_data) > 0 else 0,
-                (student2_data['Status'] == 'Present').mean() * 100 if len(student2_data) > 0 else 0
+                student2_data['Score'].mean() if not student2_data.empty else 0,
+                student2_data['Score'].median() if not student2_data.empty else 0,
+                (student2_data['Status'] == 'Present').mean() * 100 if not student2_data.empty else 0
             ]
         }
         st.table(pd.DataFrame(comparison_data))
-    
-    # Section 3: Individual Student Dashboard
+
+    # ----------------- Individual Student Dashboard -----------------
     else:
         st.header("Individual Student Dashboard")
-        
-        # Student selection
-        student_list = sorted(filtered_df['Name'].unique())
-        if len(student_list) == 0:
+
+        student_list = sorted(filtered_df['Name'].dropna().unique())
+        if not student_list:
             st.error("No students found in the filtered data")
             st.stop()
-            
+
         selected_student = st.selectbox("Select Student", student_list)
-        
-        # Filter data for selected student
         student_data = filtered_df[filtered_df['Name'] == selected_student]
-        
-        if len(student_data) == 0:
+
+        if student_data.empty:
             st.warning(f"No data available for {selected_student}")
             st.stop()
-        
-        # Calculate metrics
+
         avg_score = student_data['Score'].mean()
         attendance_rate = (student_data['Status'] == 'Present').mean() * 100
         total_score = student_data['Score'].sum()
-        
-        # Display metrics
+
         col1, col2, col3 = st.columns(3)
         col1.metric("Average Score", f"{avg_score:.2f}")
         col2.metric("Attendance Rate", f"{attendance_rate:.2f}%")
         col3.metric("Total Score", f"{total_score:.2f}")
-        
-        # Score trend
+
         st.subheader("Score Trend Over Time")
-        score_trend = student_data.groupby('WMT')['Score'].mean().reset_index()
-        if len(score_trend) > 0:
+        score_trend = student_data.groupby('WMT')['Score'].mean().reset_index().sort_values(by='WMT', key=lambda col: col.map(natural_wmt_key))
+        if not score_trend.empty:
             fig_score = px.line(score_trend, x='WMT', y='Score', title="WMT Score Trend")
             st.plotly_chart(fig_score, use_container_width=True)
         else:
             st.info("No score trend data available")
-        
-        # Attendance heatmap
+
         st.subheader("Attendance Heatmap")
         student_att = student_data.copy()
-        student_att['Day'] = student_att['Date'].dt.day
-        student_att['Month'] = student_att['Date'].dt.month
-        student_att['Year'] = student_att['Date'].dt.year
-        student_att['Status_num'] = student_att['Status'].map({'Present': 1, 'Absent': 0})
-        
-        if len(student_att) > 0:
-            heatmap_data = student_att.pivot_table(
-                values='Status_num', index='Day', columns='Month', aggfunc='mean'
-            )
-            fig_heatmap = px.imshow(heatmap_data, title="Monthly Attendance Pattern")
-            st.plotly_chart(fig_heatmap, use_container_width=True)
+        # ensure Date exists
+        student_att = student_att.dropna(subset=['Date'])
+        if not student_att.empty:
+            student_att['Day'] = student_att['Date'].dt.day
+            student_att['Month'] = student_att['Date'].dt.month
+            student_att['Year'] = student_att['Date'].dt.year
+            student_att['Status_num'] = student_att['Status'].map({'Present': 1, 'Absent': 0})
+
+            heatmap_data = student_att.pivot_table(values='Status_num', index='Day', columns='Month', aggfunc='mean')
+            if heatmap_data.empty:
+                st.info("Not enough attendance data for heatmap")
+            else:
+                fig_heatmap = px.imshow(heatmap_data, title="Monthly Attendance Pattern")
+                st.plotly_chart(fig_heatmap, use_container_width=True)
         else:
             st.info("No attendance data available for heatmap")
-        
-        # Subject-wise performance
+
         st.subheader("Subject-wise Performance")
         subject_data = student_data.copy()
-        # Clean 'WMT' column to extract subject, e.g., 'WMT W1 [30]' -> 'W1'
-        subject_data['Subject'] = subject_data['WMT'].str.extract(r'(W\d+)')
+        subject_data['Subject'] = subject_data['WMT'].astype(str).str.extract(r'(W\d+)', expand=False)
         subject_avg = subject_data.groupby('Subject')['Score'].mean().reset_index()
-        
-        if len(subject_avg) > 0:
+        if not subject_avg.empty:
             fig_subject = px.bar(subject_avg, x='Subject', y='Score', title="Average Score by Subject")
             st.plotly_chart(fig_subject, use_container_width=True)
         else:
