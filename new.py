@@ -31,10 +31,12 @@ load_css()
 def read_data_file(file):
     """Read CSV or Excel files and return DataFrame"""
     try:
-        if file.name.endswith('.csv'):
-            return pd.read_csv(file)
-        elif file.name.endswith(('.xlsx', '.xls')):
-            return pd.read_excel(file)
+        # Streamlit file_uploader provides file-like object
+        file_extension = file.name.split('.')[-1].lower()
+        if file_extension == 'csv':
+            return pd.read_csv(file, skiprows=1) # The files have an extra header row
+        elif file_extension in ['xlsx', 'xls']:
+            return pd.read_excel(file, skiprows=1)
         else:
             st.error(f"Unsupported file format: {file.name}")
             return None
@@ -95,43 +97,31 @@ def process_uploaded_files(attendance_files, score_file):
     attendance = pd.concat(attendance_dfs, ignore_index=True)
     
     # Clean attendance data - identify date columns
-    non_date_columns = ['ID', 'Name', 'Gender']
-    date_columns = []
-    
-    # Try to identify date columns
-    for col in attendance.columns:
-        if col not in non_date_columns:
-            try:
-                # Check if column name can be parsed as date
-                pd.to_datetime(col, errors='coerce')
-                date_columns.append(col)
-            except:
-                # Check if column contains date-like data
-                sample = attendance[col].dropna().head(5)
-                if any('present' in str(val).lower() or 'absent' in str(val).lower() or 
-                       '✔' in str(val) or '✘' in str(val) or 
-                       'p' in str(val).lower() or 'a' in str(val).lower() for val in sample):
-                    date_columns.append(col)
-    
+    non_date_columns = ['ID', 'Name', 'Gender', 'Roll']
+    date_columns = [col for col in attendance.columns if col not in non_date_columns]
+
     if not date_columns:
         st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
         return None, None, None
     
-    attendance[date_columns] = attendance[date_columns].replace({
-        '✔': 'Present', '✓': 'Present', 'P': 'Present', 'Present': 'Present', 'present': 'Present',
-        '✘': 'Absent', 'X': 'Absent', 'A': 'Absent', 'Absent': 'Absent', 'absent': 'Absent',
-        '1': 'Present', '0': 'Absent', 1: 'Present', 0: 'Absent'
-    })
-    
     # Melt attendance data to long format
     attendance_long = attendance.melt(
-        id_vars=['ID', 'Name', 'Gender'], 
-        value_vars=date_columns, 
-        var_name='Date', 
+        id_vars=['ID', 'Roll', 'Name', 'Gender'],
+        value_vars=date_columns,
+        var_name='Date',
         value_name='Status'
     )
-    attendance_long['Date'] = pd.to_datetime(attendance_long['Date'], errors='coerce')
-    attendance_long = attendance_long.dropna(subset=['Date'])
+    
+    # Clean the 'Status' column from values like '✔ 10' or '✘ 1'
+    attendance_long['Status'] = attendance_long['Status'].astype(str).str.strip()
+    attendance_long['Status'] = attendance_long['Status'].str.extract(r'(✔|✘)')
+    attendance_long['Status'] = attendance_long['Status'].replace({'✔': 'Present', '✘': 'Absent'})
+
+    # Convert the 'Date' column to a proper datetime format
+    # Example format: "Apr 1 Tue"
+    attendance_long['Date'] = pd.to_datetime(attendance_long['Date'], format='%b %d %a', errors='coerce')
+    
+    attendance_long.dropna(subset=['Date'], inplace=True)
     
     # Process score file
     score_df = read_data_file(score_file)
@@ -152,25 +142,31 @@ def process_uploaded_files(attendance_files, score_file):
             st.error("Score file doesn't have enough columns")
             return None, None, None
     
-    # Clean score data
-    score_df = score_df.replace(['Ab', 'AB', 'ab', 'Absent', 'N/A', '', 'NaN', 'NA', '-'], 0)
-    
+    # Drop "Total" and "Merit" columns as they are not needed for melting
+    score_df = score_df.drop(columns=[col for col in score_df.columns if 'Total' in col or 'Merit' in col], errors='ignore')
+
     # Identify score columns (non-ID and non-Name columns)
     score_columns = [col for col in score_df.columns if col not in ['ID', 'Name']]
     
+    # Clean score data and convert to numeric
     for col in score_columns:
-        score_df[col] = pd.to_numeric(score_df[col], errors='coerce').fillna(0)
+        score_df[col] = pd.to_numeric(
+            score_df[col].astype(str).str.extract('(\d+\.?\d*)').fillna('0'), # Extract numeric values
+            errors='coerce'
+        ).fillna(0)
     
     # Melt score data to long format
     wmt_long = score_df.melt(
-        id_vars=['ID', 'Name'], 
-        value_vars=score_columns, 
-        var_name='WMT', 
+        id_vars=['ID', 'Name'],
+        value_vars=score_columns,
+        var_name='WMT',
         value_name='Score'
     )
     
     # Merge data
-    merged_df = pd.merge(wmt_long, attendance_long, on=['ID', 'Name'])
+    # Use an outer merge to keep all records from both files
+    merged_df = pd.merge(wmt_long, attendance_long, on=['ID', 'Name'], how='outer')
+    
     return merged_df, score_df, attendance_long
 
 # Main app
@@ -268,7 +264,7 @@ def main():
         st.header("Class Overview Dashboard")
         
         # WMT selector
-        wmt_options = sorted([col for col in wmt_scores.columns if col not in ['ID', 'Name']])
+        wmt_options = sorted(filtered_df['WMT'].unique())
         if not wmt_options:
             st.error("No WMT columns found in the score data.")
             st.stop()
@@ -306,8 +302,11 @@ def main():
         # Top and bottom performers
         st.subheader("Top and Bottom Performers")
         if len(wmt_data) > 0:
-            top_10 = wmt_data.nlargest(min(10, len(wmt_data)), 'Score')
-            bottom_10 = wmt_data.nsmallest(min(10, len(wmt_data)), 'Score')
+            # Drop duplicates to ensure each student is counted once per WMT
+            wmt_data_unique = wmt_data.drop_duplicates(subset=['Name'])
+            
+            top_10 = wmt_data_unique.nlargest(min(10, len(wmt_data_unique)), 'Score')
+            bottom_10 = wmt_data_unique.nsmallest(min(10, len(wmt_data_unique)), 'Score')
             
             fig_top = px.bar(top_10, x='Name', y='Score', title="Top Performers")
             fig_bottom = px.bar(bottom_10, x='Name', y='Score', title="Bottom Performers")
@@ -387,7 +386,7 @@ def main():
             if len(student1_data) > 0:
                 student1_scores = student1_data.groupby('WMT')['Score'].mean().reset_index()
                 fig_trend.add_trace(go.Scatter(
-                    x=student1_scores['WMT'], 
+                    x=student1_scores['WMT'],
                     y=student1_scores['Score'],
                     name=student1
                 ))
@@ -395,7 +394,7 @@ def main():
             if len(student2_data) > 0:
                 student2_scores = student2_data.groupby('WMT')['Score'].mean().reset_index()
                 fig_trend.add_trace(go.Scatter(
-                    x=student2_scores['WMT'], 
+                    x=student2_scores['WMT'],
                     y=student2_scores['Score'],
                     name=student2
                 ))
@@ -508,7 +507,8 @@ def main():
         # Subject-wise performance
         st.subheader("Subject-wise Performance")
         subject_data = student_data.copy()
-        subject_data['Subject'] = subject_data['WMT'].str.split('_').str[0]
+        # Clean 'WMT' column to extract subject, e.g., 'WMT W1 [30]' -> 'W1'
+        subject_data['Subject'] = subject_data['WMT'].str.extract(r'(W\d+)')
         subject_avg = subject_data.groupby('Subject')['Score'].mean().reset_index()
         
         if len(subject_avg) > 0:
