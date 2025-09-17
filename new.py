@@ -34,10 +34,10 @@ def read_data_file(file):
         # Streamlit file_uploader provides file-like object
         file_extension = file.name.split('.')[-1].lower()
         if file_extension == 'csv':
-            # Specify header=1 to use the second row as headers (index 1)
+            # Specify skiprows to read the correct header row
             return pd.read_csv(file, skiprows=1)
         elif file_extension in ['xlsx', 'xls']:
-            # Specify header=1 to use the second row as headers (index 1)
+            # Specify skiprows to read the correct header row
             return pd.read_excel(file, skiprows=1)
         else:
             st.error(f"Unsupported file format: {file.name}")
@@ -57,19 +57,19 @@ def process_uploaded_files(attendance_files, score_file):
         if df is None:
             continue
             
-        # FIX: Convert all column names to strings to prevent 'int' object has no attribute 'lower' error
+        # Convert all column names to strings
         df.columns = df.columns.astype(str)
 
         # Standardize column names based on file format
         if 'ID' not in df.columns or 'Name' not in df.columns:
-            st.warning(f"Could not find ID/Name columns in {file.name}. Using first two columns.")
-            if len(df.columns) >= 2:
-                # Assuming ID is first and Name is second
-                df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Name'}, inplace=True)
+            st.warning(f"Could not find ID/Name columns in {file.name}. Using first three columns.")
+            if len(df.columns) >= 3:
+                # Assuming ID, Roll, and Name are the first three columns
+                df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Roll', df.columns[2]: 'Name'}, inplace=True)
             else:
                 st.error(f"File {file.name} doesn't have enough columns")
                 continue
-            
+        
         # Try to detect gender from filename or add unknown
         file_name = file.name.lower()
         if 'boy' in file_name or 'male' in file_name:
@@ -92,7 +92,7 @@ def process_uploaded_files(attendance_files, score_file):
     non_date_columns = ['ID', 'Name', 'Gender', 'Roll']
     date_columns = [col for col in attendance.columns if col not in non_date_columns]
 
-    # FIX: Check if date_columns is empty before proceeding
+    # Check if date_columns is empty before proceeding
     if not date_columns:
         st.error("Could not identify date columns in attendance files. Please ensure columns represent dates.")
         return None, None, None
@@ -111,7 +111,6 @@ def process_uploaded_files(attendance_files, score_file):
     attendance_long['Status'] = attendance_long['Status'].replace({'✔': 'Present', '✘': 'Absent'})
 
     # Convert the 'Date' column to a proper datetime format
-    # Example format: "Apr 1 Tue"
     attendance_long['Date'] = pd.to_datetime(attendance_long['Date'], format='%b %d %a', errors='coerce')
     
     attendance_long.dropna(subset=['Date'], inplace=True)
@@ -121,23 +120,26 @@ def process_uploaded_files(attendance_files, score_file):
     if score_df is None:
         return None, None, None
 
-    # FIX: Convert all score column names to strings as well
+    # Convert all score column names to strings as well
     score_df.columns = score_df.columns.astype(str)
     
-    # Check if a column named 'Name' exists. If not, try to rename a likely candidate.
-    if 'Name' not in score_df.columns:
-        # Assuming Name is the third column, as per the user's file format.
+    # Explicitly check for ID and Name.
+    if 'ID' not in score_df.columns or 'Name' not in score_df.columns:
+        st.warning(f"Could not find ID/Name columns in score file. Renaming the first and third columns.")
         if len(score_df.columns) >= 3:
-            score_df.rename(columns={score_df.columns[2]: 'Name'}, inplace=True)
-            st.warning("The 'Name' column was not found. Renamed the third column to 'Name'.")
-
+            # Assuming ID and Name are the first and third columns
+            score_df.rename(columns={score_df.columns[0]: 'ID', score_df.columns[2]: 'Name'}, inplace=True)
+        else:
+            st.error("Score file doesn't have enough columns")
+            return None, None, None
+            
     # Drop "Total" and "Merit" columns as they are not needed for melting
     score_df = score_df.drop(columns=[col for col in score_df.columns if 'Total' in col or 'Merit' in col], errors='ignore')
 
     # Identify score columns (non-ID and non-Name columns)
-    score_columns = [col for col in score_df.columns if col not in ['ID', 'Name']]
+    score_columns = [col for col in score_df.columns if col not in ['ID', 'Name', 'Roll']]
     
-    # FIX: Check if score_columns is empty before proceeding
+    # Check if score_columns is empty before proceeding
     if not score_columns:
         st.error("Could not identify score columns. Please ensure your score file has score data.")
         return None, None, None
@@ -158,7 +160,6 @@ def process_uploaded_files(attendance_files, score_file):
     )
     
     # Merge data
-    # Use an outer merge to keep all records from both files
     merged_df = pd.merge(wmt_long, attendance_long, on=['ID', 'Name'], how='outer')
     
     return merged_df, score_df, attendance_long
