@@ -16,13 +16,9 @@ def read_data_file(file):
     # Check if the file name suggests a CSV file
     if file_type == 'text/csv':
         try:
-            # First, try reading with header=None to handle files with pre-header text
-            df = pd.read_csv(file, header=None)
-            # Check if the first row contains a header
-            if any(isinstance(x, str) and 'ID' in x for x in df.iloc[0]):
-                return pd.read_csv(file)
-            else:
-                return df
+            # Try reading with header=0, as per the new file structure
+            df = pd.read_csv(file, header=0)
+            return df
         except pd.errors.ParserError:
             # Fallback for messy CSVs
             return pd.read_csv(file, header=None, encoding='latin1')
@@ -38,29 +34,31 @@ def read_attendance_file(file, gender):
     if df_raw is None:
         return None
 
-    # Assuming the first row is a header
-    df = df_raw.copy()
+    # The first row of your attendance files is not a header, so we re-read with header=None
+    file.seek(0)
+    df = pd.read_csv(file, header=None)
+
+    # Use the next row as the real header
+    df.columns = df.iloc[1]
+    df = df.drop([0, 1]).reset_index(drop=True)
+    df.columns = df.columns.astype(str)
     
     # Standardize column names
     cols = list(df.columns)
     if not ('ID' in cols and 'Roll' in cols and 'Name' in cols):
-        df.columns = ["ID", "Roll", "Name"] + cols[3:]
+        df.rename(columns={cols[0]: "ID", cols[1]: "Roll", cols[2]: "Name"}, inplace=True)
 
     df["Gender"] = gender
     return df
 
 def read_score_file(file):
     """Read and clean score file based on the user's description."""
-    df_raw = read_data_file(file)
-    if df_raw is None:
+    df = read_data_file(file)
+    if df is None:
         return None
     
-    # Assuming the first row contains the actual header
-    df = df_raw.copy()
-    
-    # Rename columns explicitly based on the user's description
+    # Standardize column names
     df.columns = df.columns.astype(str).str.strip()
-    df.rename(columns={df.columns[0]: 'ID', df.columns[1]: 'Roll', df.columns[2]: 'Name'}, inplace=True)
     
     # Check for required columns
     required_cols = {'ID', 'Roll', 'Name'}
@@ -105,9 +103,9 @@ def main():
             lambda x: 1 if str(x).strip().upper().startswith("✔") or str(x).strip().upper() == "P" else 0
         )
 
-        # Attendance summary per student
+        # Attendance summary per student - including 'Roll' in the groupby
         attendance_summary = (
-            attendance_long.groupby(["ID", "Name", "Gender"])["Present"]
+            attendance_long.groupby(["ID", "Name", "Roll", "Gender"])["Present"]
             .mean()
             .reset_index()
         )
@@ -127,7 +125,7 @@ def main():
         
         # Clean score data and convert to numeric, handling 'ab'
         score_long['Score'] = pd.to_numeric(
-            score_long['Score'].astype(str).str.extract(r'(\d+\.?\d*)')[0],
+            score_long['Score'].astype(str).str.extract(r'(\d+\.?\d*)').fillna('0'),
             errors='coerce'
         ).fillna(0)
         
