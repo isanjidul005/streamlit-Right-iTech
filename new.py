@@ -64,6 +64,9 @@ def process_uploaded_files(attendance_files, score_file):
         if df is None:
             continue
             
+        # FIX: Convert all column names to strings to prevent 'int' object has no attribute 'lower' error
+        df.columns = df.columns.astype(str)
+
         # Standardize column names
         id_col = find_column_by_pattern(df, ['id', 'student id', 'roll no', 'roll number'])
         name_col = find_column_by_pattern(df, ['name', 'student name', 'student'])
@@ -127,6 +130,9 @@ def process_uploaded_files(attendance_files, score_file):
     score_df = read_data_file(score_file)
     if score_df is None:
         return None, None, None
+
+    # FIX: Convert all score column names to strings as well
+    score_df.columns = score_df.columns.astype(str)
     
     # Standardize score column names
     id_col = find_column_by_pattern(score_df, ['id', 'student id', 'roll no', 'roll number'])
