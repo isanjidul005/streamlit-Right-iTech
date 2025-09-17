@@ -2,16 +2,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
 # ----------------------
-# DATA LOADING
+# CONFIG
 # ----------------------
-st.set_page_config(page_title="Class Dashboard", layout="wide")
+st.set_page_config(page_title="Super Dashboard", layout="wide")
+st.title("🌍 Super Duper Student Dashboard")
 
-st.title("📊 World-Class Student Dashboard")
-
+# ----------------------
+# UPLOAD FILES
+# ----------------------
 st.sidebar.header("Upload Data")
 att_file = st.sidebar.file_uploader("Upload Attendance CSV", type=["csv"])
 marks_file = st.sidebar.file_uploader("Upload Marks CSV", type=["csv"])
@@ -21,65 +24,88 @@ if att_file and marks_file:
     marks = pd.read_csv(marks_file)
 
     # ----------------------
-    # DATA CLEANING
+    # CLEAN ATTENDANCE
     # ----------------------
-    # Attendance summary
+    def normalize_status(x):
+        if str(x).strip().lower() in ["present", "p", "1", "yes"]:
+            return 1
+        return 0
+
+    attendance["AttValue"] = attendance["Status"].apply(normalize_status)
+
     att_summary = (
-        attendance.groupby(["ID", "Name"])["Status"]
-        .apply(lambda x: (x == "Present").mean() * 100)
+        attendance.groupby(["ID", "Name"])["AttValue"]
+        .mean()
         .reset_index(name="AttendanceRate")
     )
+    att_summary["AttendanceRate"] *= 100
 
-    # Marks summary (ignore absents)
+    # ----------------------
+    # CLEAN MARKS
+    # ----------------------
+    if "WasAbsent" not in marks.columns:
+        marks["WasAbsent"] = marks["Marks"].isna()  # fallback
+
     marks_summary = (
         marks.groupby(["ID", "Name"])
         .apply(lambda df: df.loc[~df["WasAbsent"], "Marks"].mean())
         .reset_index(name="AvgScore")
     )
 
-    # --- Fix merge key issues ---
+    # Align merge keys
     for df in [att_summary, marks_summary]:
         df["ID"] = df["ID"].astype(str).str.strip()
         df["Name"] = df["Name"].astype(str).str.strip()
 
     students = pd.merge(att_summary, marks_summary, on=["ID", "Name"], how="outer")
 
-    # Track unmatched students
-    unmatched_att = att_summary[~att_summary["ID"].isin(students["ID"])]
-    unmatched_marks = marks_summary[~marks_summary["ID"].isin(students["ID"])]
-
     # ----------------------
-    # DASHBOARD
+    # TABS
     # ----------------------
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📌 Class Overview",
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📌 Overview",
         "👤 Student Profile",
-        "⚖️ Compare Students",
+        "⚖️ Comparison",
         "📈 Correlation",
-        "📚 Subject Analysis",
+        "📚 Subjects",
+        "📊 Trends",
         "🎯 Clustering"
     ])
 
     # ----------------------
-    # CLASS OVERVIEW
+    # OVERVIEW
     # ----------------------
     with tab1:
         st.header("Class Overview")
 
         col1, col2 = st.columns(2)
         with col1:
-            fig1 = px.histogram(students, x="AttendanceRate", nbins=20, title="Attendance Distribution")
+            fig1 = px.histogram(
+                students, x="AttendanceRate", nbins=20,
+                color_discrete_sequence=px.colors.sequential.Teal,
+                title="Attendance Distribution"
+            )
             st.plotly_chart(fig1, use_container_width=True)
 
         with col2:
-            fig2 = px.histogram(students, x="AvgScore", nbins=20, title="Score Distribution")
+            fig2 = px.histogram(
+                students, x="AvgScore", nbins=20,
+                color_discrete_sequence=px.colors.sequential.OrRd,
+                title="Score Distribution"
+            )
             st.plotly_chart(fig2, use_container_width=True)
+
+        fig_box = px.box(
+            students, y="AvgScore", points="all",
+            color_discrete_sequence=["#636EFA"],
+            title="Spread of Average Scores"
+        )
+        st.plotly_chart(fig_box, use_container_width=True)
 
         with st.expander("ℹ️ Explanation"):
             st.write("""
-            - The left chart shows how student attendance is spread.
-            - The right chart shows how student average scores are spread.
-            - Both help identify weak and strong groups in the class.
+            - Distribution shows where most students fall.
+            - Boxplot highlights spread, outliers, and concentration of scores.
             """)
 
     # ----------------------
@@ -93,38 +119,36 @@ if att_file and marks_file:
         st.metric("Attendance Rate", f"{profile['AttendanceRate']:.1f}%")
         st.metric("Average Score", f"{profile['AvgScore']:.1f}")
 
-        # Subject-wise performance
         subj = marks[marks["Name"].str.strip() == student_name]
         subj_avg = subj.groupby("Subject")["Marks"].mean().reset_index()
-        fig = px.bar(subj_avg, x="Subject", y="Marks", title="Subject Performance")
-        st.plotly_chart(fig, use_container_width=True)
+
+        # Radar chart
+        fig_radar = go.Figure()
+        fig_radar.add_trace(go.Scatterpolar(
+            r=subj_avg["Marks"], theta=subj_avg["Subject"],
+            fill='toself', name=student_name
+        ))
+        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=False)
+        st.plotly_chart(fig_radar, use_container_width=True)
 
         with st.expander("ℹ️ Explanation"):
             st.write("""
-            - Attendance and average performance of the selected student.
-            - Subject performance shows where the student is strong or weak.
+            Radar chart shows subject-wise strengths and weaknesses of the student.
             """)
 
     # ----------------------
-    # STUDENT COMPARISON
+    # COMPARISON
     # ----------------------
     with tab3:
-        st.header("Compare Two Students")
-        col1, col2 = st.columns(2)
-        with col1:
-            s1 = st.selectbox("Select Student 1", students["Name"].dropna().unique(), key="s1")
-        with col2:
-            s2 = st.selectbox("Select Student 2", students["Name"].dropna().unique(), key="s2")
+        st.header("Compare Students")
+        s1 = st.selectbox("Select Student 1", students["Name"].dropna().unique(), key="s1")
+        s2 = st.selectbox("Select Student 2", students["Name"].dropna().unique(), key="s2")
 
         comp = students[students["Name"].isin([s1, s2])]
         fig = px.bar(comp, x="Name", y=["AttendanceRate", "AvgScore"], barmode="group",
-                     title="Attendance vs Score Comparison")
+                     color_discrete_sequence=px.colors.qualitative.Set2,
+                     title="Comparison of Attendance & Scores")
         st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("ℹ️ Explanation"):
-            st.write("""
-            Compare two students side by side in terms of attendance and average marks.
-            """)
 
     # ----------------------
     # CORRELATION
@@ -134,17 +158,9 @@ if att_file and marks_file:
 
         fig = px.scatter(
             students, x="AttendanceRate", y="AvgScore", color="AvgScore",
-            trendline="ols", hover_data=["Name"]
+            color_continuous_scale="Plasma", trendline="ols", hover_data=["Name"]
         )
         st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("ℹ️ Explanation"):
-            st.write("""
-            - Each point is a student.
-            - X-axis = attendance percentage.
-            - Y-axis = average score (ignores absent exams).
-            - Regression line shows if more attendance means better marks.
-            """)
 
     # ----------------------
     # SUBJECT ANALYSIS
@@ -152,44 +168,46 @@ if att_file and marks_file:
     with tab5:
         st.header("Subject Analysis")
         subj_avg = marks.loc[~marks["WasAbsent"]].groupby("Subject")["Marks"].mean().reset_index()
-        fig = px.bar(subj_avg, x="Subject", y="Marks", title="Average Score by Subject")
+        fig = px.bar(subj_avg, x="Subject", y="Marks", color="Subject",
+                     title="Average Score by Subject")
         st.plotly_chart(fig, use_container_width=True)
+
+        # Attendance by subject
+        subj_att = attendance.groupby("Subject")["AttValue"].mean().reset_index()
+        subj_att["AttValue"] *= 100
+        fig2 = px.bar(subj_att, x="Subject", y="AttValue", color="Subject",
+                      title="Attendance by Subject")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ----------------------
+    # TRENDS
+    # ----------------------
+    with tab6:
+        st.header("Trends Over Time")
+        if "Exam" in marks.columns:
+            exam_avg = marks.groupby("Exam")["Marks"].mean().reset_index()
+            fig = px.line(exam_avg, x="Exam", y="Marks", markers=True,
+                          title="Class Average Across Exams")
+            st.plotly_chart(fig, use_container_width=True)
 
     # ----------------------
     # CLUSTERING
     # ----------------------
-    with tab6:
-        st.header("Student Segmentation (Clustering)")
+    with tab7:
+        st.header("Student Clustering")
         df_cluster = students.dropna()
-        X = df_cluster[["AttendanceRate", "AvgScore"]]
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+        if not df_cluster.empty:
+            X = df_cluster[["AttendanceRate", "AvgScore"]]
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
 
-        kmeans = KMeans(n_clusters=3, random_state=42)
-        df_cluster["Cluster"] = kmeans.fit_predict(X_scaled)
+            kmeans = KMeans(n_clusters=3, random_state=42)
+            df_cluster["Cluster"] = kmeans.fit_predict(X_scaled)
 
-        fig = px.scatter(df_cluster, x="AttendanceRate", y="AvgScore",
-                         color="Cluster", hover_data=["Name"],
-                         title="Clusters of Students")
-        st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("ℹ️ Explanation"):
-            st.write("""
-            Students are grouped into clusters:
-            - High attendance & high scores
-            - Low attendance & low scores
-            - Mixed profiles
-            """)
-
-    # ----------------------
-    # DATA INTEGRITY CHECK
-    # ----------------------
-    with st.sidebar:
-        st.subheader("🔎 Data Integrity")
-        if not unmatched_att.empty:
-            st.warning(f"{len(unmatched_att)} students in attendance not in marks")
-        if not unmatched_marks.empty:
-            st.warning(f"{len(unmatched_marks)} students in marks not in attendance")
-
-else:
-    st.info("⬅️ Please upload both Attendance and Marks CSV files to start.")
+            fig = px.scatter(
+                df_cluster, x="AttendanceRate", y="AvgScore",
+                color="Cluster", hover_data=["Name"],
+                title="Clusters of Students",
+                color_discrete_sequence=px.colors.qualitative.Bold
+            )
+            st.plotly_chart(fig, use_container_width=True)
