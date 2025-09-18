@@ -1,5 +1,5 @@
-# Right_iTech_complete.py
-# Streamlit dashboard — full, polished, copy-paste ready.
+# Right_iTech.py
+
 
 import os
 from datetime import date
