@@ -266,6 +266,59 @@ with tabs[0]:
     else:
         st.info("No attendance data to compute class-level stats.")
 
+# ================================
+# Class Overview - Attendance Categories Pie
+# ================================
+st.subheader("Attendance Categories Distribution")
+
+# Calculate average attendance per student
+student_att = att_df.groupby("Name")["_present_flag_"].mean().reset_index()
+student_att["attendance_rate"] = student_att["_present_flag_"] * 100
+
+# Bucket students into categories
+def categorize(rate):
+    if rate >= 90:
+        return "Excellent (90%+)"
+    elif rate >= 75:
+        return "Good (75–90%)"
+    elif rate >= 50:
+        return "Average (50–75%)"
+    else:
+        return "Poor (<50%)"
+
+student_att["Category"] = student_att["attendance_rate"].apply(categorize)
+
+# Count how many students fall in each bucket
+cat_counts = student_att["Category"].value_counts().reset_index()
+cat_counts.columns = ["Category", "Count"]
+
+# Plot pie chart
+fig_cat = px.pie(cat_counts, values="Count", names="Category",
+                 color="Category",
+                 color_discrete_map={
+                     "Excellent (90%+)": "#2ca02c",
+                     "Good (75–90%)": "#1f77b4",
+                     "Average (50–75%)": "#ff7f0e",
+                     "Poor (<50%)": "#d62728"
+                 },
+                 title="Distribution of Students by Attendance Category")
+st.plotly_chart(fig_cat, use_container_width=True)
+
+# Toggle explanation
+with st.expander("ℹ️ Explanation"):
+    st.markdown("""
+    This chart groups students based on their **attendance percentage**:
+    
+    - ✅ **Excellent (90%+)**: Very regular, rarely miss classes.  
+    - 🔵 **Good (75–90%)**: Acceptable, but could improve.  
+    - 🟠 **Average (50–75%)**: At risk of falling behind.  
+    - 🔴 **Poor (<50%)**: Serious concern, often absent.  
+
+    The pie slices show how many students fall into each group, giving you
+    a quick overview of class attendance health.
+    """)
+
+
 # -------------------------
 # Tab 2: Student Profile
 # -------------------------
