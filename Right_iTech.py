@@ -13,16 +13,20 @@ st.set_page_config(page_title="Right iTech", layout="wide")
 st.title("📊 Right iTech - Student Analytics Dashboard")
 
 # ================================
-# Load Data
+# Sidebar Upload
 # ================================
-@st.cache_data
-def load_data():
-    attendance_df = pd.read_csv("/mnt/data/combined_attendance.csv")
-    marks_df = pd.read_csv("/mnt/data/cleanest_marks.csv")
-    return attendance_df, marks_df
+st.sidebar.header("📂 Upload Your Data")
 
-attendance_df, marks_df = load_data()
-attendance_df['Date'] = pd.to_datetime(attendance_df['Date'])
+att_file = st.sidebar.file_uploader("Upload Attendance CSV", type="csv")
+marks_file = st.sidebar.file_uploader("Upload Marks CSV", type="csv")
+
+if att_file and marks_file:
+    attendance_df = pd.read_csv(att_file)
+    marks_df = pd.read_csv(marks_file)
+    attendance_df['Date'] = pd.to_datetime(attendance_df['Date'])
+else:
+    st.warning("⚠️ Please upload both Attendance and Marks CSV files to proceed.")
+    st.stop()
 
 # ================================
 # Sidebar Navigation
@@ -48,7 +52,7 @@ if choice == "📌 Overview":
     col3.metric("👦 Boys", boys)
     col4.metric("📅 Avg Attendance", f"{avg_attendance:.1%}")
 
-    # Attendance Pie Chart (meaningful)
+    # Attendance Pie Chart
     att_pie = pd.DataFrame({
         "Status": ["Present", "Absent"],
         "Rate": [avg_attendance, avg_absence]
