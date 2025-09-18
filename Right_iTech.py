@@ -1,10 +1,14 @@
-# Right_iTech_streamlit_fixed.py
-# Full app with pandas-2.x compatible radar fix + gender counts + avg present/absent capsule
+# Right_iTech_final.py
+# Full app with:
+# - consistent subject colors across app
+# - marks trends lines by SUBJECT across exams (filterable)
+# - daily attendance heatmap / per-student selection
+# - preserves Avg Present / Avg Absent pills
+# - no exports
+# - robust to missing data
 
 import os
 from datetime import date
-import io
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,31 +22,24 @@ st.set_page_config(page_title="Right iTech", layout="wide", initial_sidebar_stat
 px.defaults.template = "plotly_white"
 
 # -------------------------
-# Professional color palette (distinct colors)
+# Subject palette (distinct & professional)
 # -------------------------
 DISTINCT_PALETTE = [
-    "#1f77b4",  # blue
-    "#ff7f0e",  # orange
-    "#2ca02c",  # green
-    "#9467bd",  # purple
-    "#d62728",  # red
-    "#17becf",  # teal
-    "#8c564b",  # brown
-    "#e377c2",  # pink
-    "#7f7f7f",  # gray
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#d62728",
+    "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#393b79"
 ]
-ATT_PRESENT_COLOR = "#2ca02c"
-ATT_ABSENT_COLOR = "#d62728"
+PRESENT_COLOR = "#2ca02c"
+ABSENT_COLOR = "#d62728"
 NEUTRAL = "#4a4a4a"
 
 # -------------------------
-# Sidebar: upload + options
+# Sidebar: upload + preferences
 # -------------------------
 st.sidebar.header("Upload data & preferences")
 att_upload = st.sidebar.file_uploader("Attendance CSV (optional)", type=["csv"])
 marks_upload = st.sidebar.file_uploader("Marks CSV (optional)", type=["csv"])
 
-# fallback paths (if files already on server)
+# fallback files if present on server
 FALLBACK_ATT = "/mnt/data/combined_attendance.csv"
 FALLBACK_MARKS = "/mnt/data/cleanest_marks.csv"
 
@@ -67,37 +64,29 @@ flag_score_threshold = st.sidebar.number_input("Flag if avg score < (score)", mi
 flag_att_threshold_pct = st.sidebar.slider("Flag if attendance < (%)", 0, 100, 75)
 
 # -------------------------
-# Title (no white box) — centered and readable
+# Title (no white box)
 # -------------------------
-st.markdown(
-    "<h1 style='text-align:center; color:#1f77b4; margin-bottom:4px;'>Right iTech</h1>",
-    unsafe_allow_html=True,
-)
-st.markdown(
-    "<p style='text-align:center; color:#666; margin-top:0px; margin-bottom:12px;'>Professional, readable analytics for marks & attendance — interactive visuals.</p>",
-    unsafe_allow_html=True,
-)
+st.markdown("<h1 style='text-align:center; color:#1f77b4; margin-bottom:4px;'>Right iTech</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; color:#666; margin-top:0px; margin-bottom:12px;'>Professional, readable analytics for marks & attendance — interactive visuals.</p>", unsafe_allow_html=True)
 st.write("---")
 
 # -------------------------
 # Defensive cleaning & normalization
 # -------------------------
-if att_df is None:
-    att_df = pd.DataFrame()
-if marks_df is None:
-    marks_df = pd.DataFrame()
+if att_df is None: att_df = pd.DataFrame()
+if marks_df is None: marks_df = pd.DataFrame()
 
-# normalize column names
+# cleanup column names
 if not att_df.empty:
     att_df.columns = [c.strip() for c in att_df.columns]
 if not marks_df.empty:
     marks_df.columns = [c.strip() for c in marks_df.columns]
 
-# parse Date safely
+# parse dates safely
 if not att_df.empty and "Date" in att_df.columns:
     att_df["Date"] = pd.to_datetime(att_df["Date"], dayfirst=True, errors="coerce")
 
-# unified present flag
+# unify present flag
 if not att_df.empty:
     if "Status" in att_df.columns:
         att_df["_present_flag_"] = att_df["Status"].astype(str).str.upper().map({
@@ -112,7 +101,7 @@ if not att_df.empty:
 else:
     att_df["_present_flag_"] = pd.Series(dtype=float)
 
-# ensure numeric Marks
+# marks numeric
 if not marks_df.empty:
     if "Marks" in marks_df.columns:
         marks_df["Marks"] = pd.to_numeric(marks_df["Marks"], errors="coerce")
@@ -123,7 +112,7 @@ if not marks_df.empty:
 else:
     marks_df = pd.DataFrame(columns=["ID","Roll","Name","Subject","ExamNumber","Exam","ExamType","Marks","FullMarks"])
 
-# subject color mapping (distinct & consistent)
+# subject color mapping
 def assign_subject_colors(subjects):
     subs = sorted([s for s in subjects if pd.notna(s)])
     mapping = {}
@@ -134,30 +123,29 @@ def assign_subject_colors(subjects):
 SUBJECT_COLORS = assign_subject_colors(marks_df["Subject"].unique()) if ("Subject" in marks_df.columns and not marks_df.empty) else {}
 
 # -------------------------
-# Utility helpers
+# Helpers
 # -------------------------
-def safe_mean(series):
-    return series.mean() if series.notna().any() else np.nan
-
 def student_summary_df(mdf):
     if mdf.empty:
         return pd.DataFrame()
-    s = mdf.groupby(["ID","Roll","Name"], as_index=False).agg(
-        avg_score=("Marks","mean"),
-        exams_taken=("ExamNumber","nunique"),
-        records=("Marks","count")
-    )
+    s = mdf.groupby(["ID","Roll","Name"], as_index=False).agg(avg_score=("Marks","mean"), exams_taken=("ExamNumber","nunique"), records=("Marks","count"))
     return s
 
+def pct(x):
+    try:
+        return f"{x*100:.1f}%"
+    except Exception:
+        return "N/A"
+
 # -------------------------
-# If no data, show message and stop
+# If no data show message and stop
 # -------------------------
 if att_df.empty and marks_df.empty:
     st.warning("No data detected. Upload Attendance and Marks CSVs in the sidebar or place fallback files at /mnt/data/*.csv")
     st.stop()
 
 # -------------------------
-# Global filters (sidebar)
+# Global filters sidebar
 # -------------------------
 st.sidebar.header("Global filters")
 if not att_df.empty and "Date" in att_df.columns and not att_df["Date"].isna().all():
@@ -177,69 +165,68 @@ exam_filter = st.sidebar.multiselect("Filter exams", options=exam_options, defau
 name_search = st.sidebar.text_input("Search student name (partial)")
 
 # -------------------------
-# Layout tabs
+# Tabs layout
 # -------------------------
 tabs = st.tabs(["Class Overview","Student Dashboard","Compare Students","Attendance","Marks","Insights"])
 
-# ===== Tab 0: Class Overview =====
+# ===== Tab: Class Overview =====
 with tabs[0]:
-    st.header("Class Overview (snapshot)")
+    st.header("Class Overview")
 
-    # top metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # metrics row
+    c1, c2, c3, c4 = st.columns(4)
     ids_set = set()
     if not marks_df.empty and "ID" in marks_df.columns:
         ids_set.update(marks_df["ID"].dropna().astype(str).tolist())
     if not att_df.empty and "ID" in att_df.columns:
         ids_set.update(att_df["ID"].dropna().astype(str).tolist())
     total_students = len(ids_set) if ids_set else (marks_df["Name"].nunique() if not marks_df.empty and "Name" in marks_df.columns else 0)
-    col1.metric("Total students", total_students)
+    c1.metric("Total students", total_students)
 
-    # robust gender counts
+    # robust gender counts (prefers ID uniqueness if available)
     if not att_df.empty and "Gender" in att_df.columns:
-        # prefer unique ID if present, else fallback to Name
-        unique_students = att_df.copy()
-        if "ID" in unique_students.columns:
-            unique_students = unique_students.drop_duplicates(subset=["ID"])
+        uniq = att_df.copy()
+        if "ID" in uniq.columns:
+            uniq = uniq.drop_duplicates(subset=["ID"])
             id_col = "ID"
         else:
-            unique_students = unique_students.drop_duplicates(subset=["Name"])
+            uniq = uniq.drop_duplicates(subset=["Name"])
             id_col = "Name"
-        # normalize gender string
-        unique_students["__g__"] = unique_students["Gender"].astype(str).fillna("").str.strip().str.lower()
+        uniq["__g__"] = uniq["Gender"].astype(str).fillna("").str.strip().str.lower()
         def norm_g(x):
             if x.startswith("m"): return "male"
             if x.startswith("f"): return "female"
             return "other"
-        unique_students["__g_norm__"] = unique_students["__g__"].apply(norm_g)
-        boys = unique_students[unique_students["__g_norm__"]=="male"][id_col].nunique() if id_col in unique_students.columns else 0
-        girls = unique_students[unique_students["__g_norm__"]=="female"][id_col].nunique() if id_col in unique_students.columns else 0
-        col2.metric("Boys", int(boys))
-        col3.metric("Girls", int(girls))
+        uniq["__g_norm__"] = uniq["__g__"].apply(norm_g)
+        boys = uniq[uniq["__g_norm__"]=="male"][id_col].nunique() if id_col in uniq.columns else 0
+        girls = uniq[uniq["__g_norm__"]=="female"][id_col].nunique() if id_col in uniq.columns else 0
+        c2.metric("Boys", int(boys))
+        c3.metric("Girls", int(girls))
     else:
-        col2.metric("Boys", "N/A"); col3.metric("Girls", "N/A")
+        c2.metric("Boys", "N/A"); c3.metric("Girls", "N/A")
 
     avg_att = att_df["_present_flag_"].mean() if not att_df.empty else np.nan
-    col4.metric("Avg attendance", f"{avg_att*100:.1f}%" if not np.isnan(avg_att) else "N/A")
+    c4.metric("Avg attendance", f"{avg_att*100:.1f}%" if not np.isnan(avg_att) else "N/A")
 
-    st.markdown("")  # small spacer
+    st.markdown("")  # spacer
 
-    # Present / Absent capsule (simple capsule-style row of metrics)
-    capsule_col1, capsule_col2, _ = st.columns([1,1,4])
+    # Keep ONLY the Avg Present / Avg Absent pills (capsule style)
+    cap1, cap2, _ = st.columns([1,1,6])
     avg_present = avg_att
     avg_absent = (1 - avg_att) if not np.isnan(avg_att) else np.nan
-    capsule_col1.markdown(
-        f"<div style='background:#f1f5f9;padding:10px;border-radius:8px;text-align:center'><div style='color:#0b3d91;font-weight:700'>Avg Present</div><div style='font-size:18px'>{f'{avg_present*100:.1f}%' if not np.isnan(avg_present) else 'N/A'}</div></div>",
+    cap1.markdown(
+        f"<div style='background:#f8fafc;padding:10px;border-radius:8px;text-align:center'><div style='color:#0b3d91;font-weight:700'>Avg Present</div><div style='font-size:18px'>{f'{avg_present*100:.1f}%' if not np.isnan(avg_present) else 'N/A'}</div></div>",
         unsafe_allow_html=True
     )
-    capsule_col2.markdown(
-        f"<div style='background:#f1f5f9;padding:10px;border-radius:8px;text-align:center'><div style='color:#7f1f1f;font-weight:700'>Avg Absent</div><div style='font-size:18px'>{f'{avg_absent*100:.1f}%' if not np.isnan(avg_absent) else 'N/A'}</div></div>",
+    cap2.markdown(
+        f"<div style='background:#f8fafc;padding:10px;border-radius:8px;text-align:center'><div style='color:#7f1f1f;font-weight:700'>Avg Absent</div><div style='font-size:18px'>{f'{avg_absent*100:.1f}%' if not np.isnan(avg_absent) else 'N/A'}</div></div>",
         unsafe_allow_html=True
     )
 
     st.markdown("---")
 
-    # filtered marks based on subject/exam/name filters
+    # Score distribution histogram
+    st.subheader("Score distribution (filtered)")
     marks_filtered = marks_df.copy()
     if subject_filter:
         marks_filtered = marks_filtered[marks_filtered["Subject"].isin(subject_filter)]
@@ -248,81 +235,28 @@ with tabs[0]:
     if name_search:
         marks_filtered = marks_filtered[marks_filtered["Name"].str.contains(name_search, case=False, na=False)]
 
-    # Score histogram
-    st.subheader("Score distribution")
     if not marks_filtered.empty and "Marks" in marks_filtered.columns:
-        fig_hist = px.histogram(marks_filtered, x="Marks", nbins=25, title="Distribution of marks (filtered)", color_discrete_sequence=[DISTINCT_PALETTE[0]])
+        fig_hist = px.histogram(marks_filtered, x="Marks", nbins=25, color_discrete_sequence=[DISTINCT_PALETTE[0]])
         st.plotly_chart(fig_hist, use_container_width=True)
         with st.expander("Explanation", expanded=auto_expand):
-            st.write(
-                "Histogram of marks across the dataset (filters applied). "
-                "This helps spot overall performance: many low bars = many low scores; a high concentration near the top means many high performers."
-            )
+            st.write("Histogram shows distribution of recorded marks. Use filters to focus on subjects or exams.")
     else:
-        st.info("Not enough marks data to show distribution.")
+        st.info("Not enough marks to show distribution.")
 
     st.markdown("---")
 
-    # Attendance quality buckets (student-level)
-    st.subheader("Attendance quality (student buckets)")
-    if not att_df.empty and "Name" in att_df.columns and "_present_flag_" in att_df.columns:
-        try:
-            sd, ed = (date_range[0], date_range[1]) if isinstance(date_range, (list,tuple)) and len(date_range)==2 else (date_range, date_range)
-        except Exception:
-            sd, ed = min_date, max_date
-        if "Date" in att_df.columns:
-            mask = (att_df["Date"].dt.date >= sd) & (att_df["Date"].dt.date <= ed)
-            att_range = att_df[mask]
-        else:
-            att_range = att_df.copy()
-
-        per_student = att_range.groupby("Name")["_present_flag_"].mean().reset_index().rename(columns={"_present_flag_":"att_mean"})
-        per_student["pct"] = per_student["att_mean"] * 100
-        def bucket(v):
-            if v >= 90: return "Excellent (90%+)"
-            if v >= 75: return "Good (75–90%)"
-            if v >= 50: return "Average (50–75%)"
-            return "Poor (<50%)"
-        per_student["bucket"] = per_student["pct"].apply(bucket)
-        counts = per_student["bucket"].value_counts().reindex(["Excellent (90%+)","Good (75–90%)","Average (50–75%)","Poor (<50%)"]).fillna(0).reset_index()
-        counts.columns = ["Category","Count"]
-        fig_pie = px.pie(counts, names="Category", values="Count", title="Students by attendance quality",
-                         color_discrete_sequence=["#2ca02c","#17becf","#ff7f0e","#d62728"])
-        st.plotly_chart(fig_pie, use_container_width=True)
-        with st.expander("Explanation", expanded=auto_expand):
-            st.write(
-                "Students are bucketed by their personal attendance percentage over the selected date range. "
-                "This quickly shows how many students fall into good vs at-risk categories."
-            )
-    else:
-        st.info("Not enough attendance data for student-level buckets.")
-
-    st.markdown("---")
-
-    # Subject-level summary (avg and pass rate)
+    # Subject-level summary
     st.subheader("Subject-level summary")
     if not marks_df.empty and "Subject" in marks_df.columns and "Marks" in marks_df.columns:
         subj = marks_df.groupby("Subject").agg(avg_score=("Marks","mean"), median_score=("Marks","median"), count=("Marks","count")).reset_index().sort_values("avg_score", ascending=False)
-        fig_sub_avg = px.bar(subj, x="Subject", y="avg_score", title="Average score by subject", color="Subject", color_discrete_map=SUBJECT_COLORS)
-        st.plotly_chart(fig_sub_avg, use_container_width=True)
+        fig_sub = px.bar(subj, x="Subject", y="avg_score", color="Subject", color_discrete_map=SUBJECT_COLORS, title="Average score by subject")
+        st.plotly_chart(fig_sub, use_container_width=True)
         with st.expander("Explanation", expanded=auto_expand):
-            st.write(
-                "Average score per subject — helps identify strong and weak subjects at class level."
-            )
-
-        # pass rate
-        subj_pass = marks_df.copy()
-        subj_pass["pass"] = subj_pass["Marks"] >= pass_threshold
-        pass_summary = subj_pass.groupby("Subject")["pass"].mean().reset_index().rename(columns={"pass":"pass_rate"}).sort_values("pass_rate", ascending=False)
-        fig_pass = px.bar(pass_summary, x="Subject", y="pass_rate", title=f"Pass rate per subject (>= {pass_threshold})", color="Subject", color_discrete_map=SUBJECT_COLORS)
-        fig_pass.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_pass, use_container_width=True)
-        with st.expander("Explanation", expanded=auto_expand):
-            st.write("Pass rate shows the % of records meeting the pass threshold — a clear way to prioritize subjects for intervention.")
+            st.write("Average scores per subject — use to identify strong and weak subjects for the class.")
     else:
         st.info("Not enough marks data for subject summary.")
 
-# ===== Tab 1: Student Dashboard =====
+# ===== Tab: Student Dashboard =====
 with tabs[1]:
     st.header("Student Dashboard")
     students = []
@@ -332,13 +266,12 @@ with tabs[1]:
         students = sorted(att_df["Name"].dropna().unique().tolist())
 
     if not students:
-        st.info("No student names found in data.")
+        st.info("No student names found.")
     else:
         student = st.selectbox("Select student", students)
         s_marks = marks_df[marks_df["Name"]==student] if not marks_df.empty else pd.DataFrame()
         s_att = att_df[att_df["Name"]==student] if not att_df.empty else pd.DataFrame()
 
-        # profile card
         st.subheader(student)
         sid = (s_marks["ID"].iloc[0] if (not s_marks.empty and "ID" in s_marks.columns) else (s_att["ID"].iloc[0] if (not s_att.empty and "ID" in s_att.columns) else "N/A"))
         sroll = (s_marks["Roll"].iloc[0] if (not s_marks.empty and "Roll" in s_marks.columns) else (s_att["Roll"].iloc[0] if (not s_att.empty and "Roll" in s_att.columns) else "N/A"))
@@ -346,68 +279,60 @@ with tabs[1]:
         with colA:
             st.markdown(f"**ID:** {sid}  \n**Roll:** {sroll}")
         with colB:
-            avg_mark = s_marks["Marks"].mean() if not s_marks.empty and "Marks" in s_marks.columns else np.nan
-            att_rate = s_att["_present_flag_"].mean() if not s_att.empty and "_present_flag_" in s_att.columns else np.nan
-            st.metric("Average mark", f"{avg_mark:.1f}" if not np.isnan(avg_mark) else "N/A")
-            st.metric("Attendance rate", f"{att_rate*100:.1f}%" if not np.isnan(att_rate) else "N/A")
+            avg_m = s_marks["Marks"].mean() if not s_marks.empty and "Marks" in s_marks.columns else np.nan
+            att_r = s_att["_present_flag_"].mean() if not s_att.empty and "_present_flag_" in s_att.columns else np.nan
+            st.metric("Average mark", f"{avg_m:.1f}" if not np.isnan(avg_m) else "N/A")
+            st.metric("Attendance rate", f"{att_r*100:.1f}%" if not np.isnan(att_r) else "N/A")
 
         st.markdown("---")
-
-        # Radar / polar for subject strengths (fixed for pandas 2.x)
+        # Radar (subject strengths) - keep as optional and simple
         st.subheader("Subject strengths (radar)")
         if not s_marks.empty and "Subject" in s_marks.columns:
-            subj_avg = s_marks.groupby("Subject")["Marks"].mean().reset_index()
-            subj_avg = subj_avg.sort_values("Marks", ascending=False).reset_index(drop=True)
+            subj_avg = s_marks.groupby("Subject")["Marks"].mean().reset_index().sort_values("Marks", ascending=False).reset_index(drop=True)
             polar_df = subj_avg.copy()
             if len(polar_df) > 0:
-                # concat the first row to the end to close the radar polygon (pandas 2.x compatible)
                 polar_df = pd.concat([polar_df, polar_df.iloc[[0]]], ignore_index=True)
             if not polar_df.empty:
-                fig_polar = go.Figure()
-                fig_polar.add_trace(go.Scatterpolar(
-                    r=polar_df["Marks"],
-                    theta=polar_df["Subject"],
-                    fill='toself',
-                    name=student,
-                    marker=dict(color=DISTINCT_PALETTE[0])
-                ))
-                fig_polar.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=False, title="Subject average radar")
-                st.plotly_chart(fig_polar, use_container_width=True)
+                fig = go.Figure()
+                fig.add_trace(go.Scatterpolar(r=polar_df["Marks"], theta=polar_df["Subject"], fill="toself", marker=dict(color=DISTINCT_PALETTE[0])))
+                fig.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=False, title="Subject averages (radar)")
+                st.plotly_chart(fig, use_container_width=True)
                 with st.expander("Explanation", expanded=auto_expand):
-                    st.write("Radar chart shows relative strength across subjects for this student. Larger area = stronger overall.")
+                    st.write("Radar shows relative strengths across subjects for this student.")
         else:
-            st.info("Not enough subject-level marks for radar.")
+            st.info("No subject marks for this student.")
 
         st.markdown("---")
-
-        # Marks trend by exam (line chart)
-        st.subheader("Marks across exams")
-        if not s_marks.empty and "ExamNumber" in s_marks.columns:
-            exam_trend = s_marks.groupby(["ExamNumber"])["Marks"].mean().reset_index()
-            fig_ex = px.line(exam_trend, x="ExamNumber", y="Marks", markers=True, title="Average marks by exam for this student")
-            st.plotly_chart(fig_ex, use_container_width=True)
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Shows the student's average marks per exam — look for improvement or decline.")
+        # Marks across exams by subject lines (for this student)
+        st.subheader("Marks across exams (subject lines for this student)")
+        if not s_marks.empty and "ExamNumber" in s_marks.columns and "Subject" in s_marks.columns:
+            s_trend = s_marks.groupby(["ExamNumber","Subject"])["Marks"].mean().reset_index()
+            # subject filter inside student (default show all subjects student has)
+            subj_list_s = sorted(s_trend["Subject"].unique().tolist())
+            chosen_subj_s = st.multiselect("Subjects to show (student)", options=subj_list_s, default=subj_list_s)
+            plot_df = s_trend[s_trend["Subject"].isin(chosen_subj_s)]
+            if not plot_df.empty:
+                fig_st = px.line(plot_df, x="ExamNumber", y="Marks", color="Subject", markers=True, color_discrete_map=SUBJECT_COLORS)
+                st.plotly_chart(fig_st, use_container_width=True)
+            else:
+                st.info("No subject-exam marks after filtering.")
         else:
-            st.info("No exam-level marks to plot.")
+            st.info("Not enough exam-level marks for this student.")
 
         st.markdown("---")
-
-        # Attendance by month
+        # Attendance by month for student
         st.subheader("Attendance by month")
         if not s_att.empty and "Date" in s_att.columns:
             s_att2 = s_att.copy()
             s_att2["month"] = s_att2["Date"].dt.to_period("M").astype(str)
             monthly = s_att2.groupby("month")["_present_flag_"].mean().reset_index()
-            fig_attm = px.bar(monthly, x="month", y="_present_flag_", title="Monthly attendance")
-            fig_attm.update_yaxes(tickformat=".0%")
-            st.plotly_chart(fig_attm, use_container_width=True)
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Monthly attendance gives a smoother, easier-to-read summary than day-by-day dots.")
+            fig_m = px.bar(monthly, x="month", y="_present_flag_", title="Monthly attendance (student)")
+            fig_m.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_m, use_container_width=True)
         else:
             st.info("No attendance records for this student.")
 
-# ===== Tab 2: Compare Students =====
+# ===== Tab: Compare Students =====
 with tabs[2]:
     st.header("Compare Students")
     candidate_names = sorted(set(marks_df["Name"].dropna().tolist())) if ("Name" in marks_df.columns and not marks_df.empty) else []
@@ -424,40 +349,33 @@ with tabs[2]:
         st.subheader("Subject-wise comparison")
         comp_avg = comp.groupby(["Name","Subject"])["Marks"].mean().reset_index()
         if not comp_avg.empty:
-            fig_cmp = px.bar(comp_avg, x="Subject", y="Marks", color="Name", barmode="group")
+            fig_cmp = px.bar(comp_avg, x="Subject", y="Marks", color="Name", barmode="group", title="Subject-wise averages (selected students)")
             st.plotly_chart(fig_cmp, use_container_width=True)
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Compares subject averages across selected students — helpful to see who is stronger in which subject.")
-        else:
-            st.info("No subject averages for the selected students/exam.")
 
         st.markdown("---")
-        st.subheader("Attendance vs Marks (scatter)")
+        st.subheader("Attendance vs Marks (selected students)")
         if not att_df.empty and not marks_df.empty:
             marks_avg = marks_df.groupby("Name")["Marks"].mean().reset_index().rename(columns={"Marks":"avg_marks"})
             att_avg = att_df.groupby("Name")["_present_flag_"].mean().reset_index().rename(columns={"_present_flag_":"att_rate"})
             merged = pd.merge(marks_avg, att_avg, on="Name", how="inner")
             merged = merged[merged["Name"].isin(selected)]
             if not merged.empty:
-                fig_sc = px.scatter(merged, x="att_rate", y="avg_marks", text="Name", size="avg_marks",
-                                    labels={"att_rate":"Attendance %","avg_marks":"Avg Marks"}, color_discrete_sequence=[DISTINCT_PALETTE[1]])
+                fig_sc = px.scatter(merged, x="att_rate", y="avg_marks", color="Name", size="avg_marks", hover_name="Name")
                 fig_sc.update_xaxes(tickformat=".0%")
                 st.plotly_chart(fig_sc, use_container_width=True)
-                with st.expander("Explanation", expanded=auto_expand):
-                    st.write("Scatter of attendance vs average marks for selected students — bottom-left is both low attendance and low marks (intervention candidates).")
             else:
                 st.info("No combined attendance+marks records for selected students.")
         else:
-            st.info("Need both attendance and marks data to show correlation.")
+            st.info("Need both marks and attendance to show correlation.")
 
-# ===== Tab 3: Attendance =====
+# ===== Tab: Attendance =====
 with tabs[3]:
-    st.header("Attendance")
+    st.header("Attendance Explorer")
 
     if att_df.empty:
         st.info("No attendance data.")
     else:
-        # date selection in-tab
+        # date selector
         min_d = att_df["Date"].min().date() if ("Date" in att_df.columns and not att_df["Date"].isna().all()) else date.today()
         max_d = att_df["Date"].max().date() if ("Date" in att_df.columns and not att_df["Date"].isna().all()) else date.today()
         dr = st.date_input("Select date range", value=(min_d, max_d))
@@ -468,110 +386,119 @@ with tabs[3]:
 
         if "Date" in att_df.columns:
             mask = (att_df["Date"].dt.date >= sd) & (att_df["Date"].dt.date <= ed)
-            att_filtered = att_df[mask]
+            att_filtered = att_df[mask].copy()
         else:
             att_filtered = att_df.copy()
 
-        st.subheader("Daily class attendance %")
+        st.subheader("Daily class attendance % (aggregate)")
         if not att_filtered.empty and "_present_flag_" in att_filtered.columns:
-            att_trend = att_filtered.groupby(att_filtered["Date"].dt.date)["_present_flag_"].mean().reset_index().rename(columns={"_present_flag_":"attendance_rate"})
-            fig = px.line(att_trend, x="Date", y="attendance_rate", markers=True, title="Daily attendance %")
-            fig.update_yaxes(tickformat=".0%")
-            st.plotly_chart(fig, use_container_width=True)
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Daily class attendance percentage over the selected date range.")
+            daily = att_filtered.groupby(att_filtered["Date"].dt.date)["_present_flag_"].mean().reset_index().rename(columns={"_present_flag_":"attendance_rate"})
+            fig_daily = px.line(daily, x="Date", y="attendance_rate", markers=True, title="Daily class attendance %")
+            fig_daily.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_daily, use_container_width=True)
         else:
-            st.info("No daily attendance records for the selected range.")
+            st.info("No daily attendance records in range.")
 
         st.markdown("---")
-        st.subheader("Average attendance by weekday")
-        try:
-            att_filtered["weekday"] = att_filtered["Date"].dt.day_name()
-            weekday_avg = att_filtered.groupby("weekday")["_present_flag_"].mean().reindex(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).reset_index().dropna()
-            weekday_avg.columns = ["weekday","attendance_rate"]
-            fig_w = px.bar(weekday_avg, x="weekday", y="attendance_rate", title="Average attendance by weekday")
-            fig_w.update_yaxes(tickformat=".0%")
-            st.plotly_chart(fig_w, use_container_width=True)
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Shows typical attendance per weekday — useful when scheduling important lessons or exams.")
-        except Exception:
-            st.info("Unable to compute weekday summary for your dataset.")
-
-        st.markdown("---")
-        st.subheader("Attendance leaderboard (top N)")
-        n = st.number_input("Show top N students by attendance", min_value=5, max_value=200, value=20)
-        if not att_filtered.empty:
-            leader = att_filtered.groupby("Name")["_present_flag_"].mean().reset_index().sort_values("_present_flag_", ascending=False).reset_index(drop=True)
-            leader["attendance_pct"] = leader["_present_flag_"].apply(lambda x: f"{x*100:.1f}%")
-            st.dataframe(leader[["Name","attendance_pct"]].head(n).set_index("Name"))
-            with st.expander("Explanation", expanded=auto_expand):
-                st.write("Top students by attendance in the selected range — great for recognition or to model best practices.")
+        # Daily attendance by student - heatmap style
+        st.subheader("Daily attendance per student (heatmap)")
+        students_all = sorted(att_filtered["Name"].dropna().unique().tolist()) if "Name" in att_filtered.columns else []
+        chosen_students = st.multiselect("Select students to include (leave empty = top 20 by records)", options=students_all, default=students_all[:20])
+        if chosen_students:
+            heat_df = att_filtered[att_filtered["Name"].isin(chosen_students)].copy()
         else:
-            st.info("No attendance summary available.")
+            heat_df = att_filtered.copy()
 
-# ===== Tab 4: Marks =====
+        if not heat_df.empty and "Date" in heat_df.columns and "Name" in heat_df.columns:
+            # pivot table: rows=Name, cols=Date, values=mean present (should be 0/1 or NaN)
+            pivot = heat_df.pivot_table(index="Name", columns=heat_df["Date"].dt.date, values="_present_flag_", aggfunc="mean", fill_value=np.nan)
+            # sort rows by average attendance descending
+            pivot["__avg__"] = pivot.mean(axis=1)
+            pivot = pivot.sort_values("__avg__", ascending=False).drop(columns="__avg__", errors="ignore")
+            if pivot.shape[1] == 0:
+                st.info("No date columns to show.")
+            else:
+                # For readability, limit number of columns (dates) if huge
+                max_dates = 60
+                if pivot.shape[1] > max_dates:
+                    # keep most recent
+                    keep_cols = pivot.columns[-max_dates:]
+                    pivot = pivot[keep_cols]
+                # plot heatmap using Plotly
+                z = pivot.values
+                x = [str(d) for d in pivot.columns]
+                y = pivot.index.tolist()
+                fig_h = go.Figure(data=go.Heatmap(z=z, x=x, y=y, colorscale=[[0, "#d62728"], [0.5, "#ffffff"], [1, "#2ca02c"]], zmin=0, zmax=1, colorbar=dict(title="Present (1) / Absent (0)")))
+                fig_h.update_layout(height= max(300, 25*len(y)), xaxis_nticks=20)
+                st.plotly_chart(fig_h, use_container_width=True)
+                with st.expander("Explanation", expanded=auto_expand):
+                    st.write("Heatmap shows daily present(1)/absent(0) per selected student. Green = present, red = absent. Hover for details.")
+        else:
+            st.info("Not enough data to create per-student daily heatmap.")
+
+# ===== Tab: Marks =====
 with tabs[4]:
-    st.header("Marks")
+    st.header("Marks Explorer")
 
-    st.subheader("Boxplot: marks by subject")
-    if not marks_df.empty and "Marks" in marks_df.columns and "Subject" in marks_df.columns:
-        box_df = marks_df.copy()
-        if subject_filter:
-            box_df = box_df[box_df["Subject"].isin(subject_filter)]
-        fig_box = px.box(box_df, x="Subject", y="Marks", color="Subject", color_discrete_map=SUBJECT_COLORS, title="Distribution by subject (boxplot)")
-        st.plotly_chart(fig_box, use_container_width=True)
-        with st.expander("Explanation", expanded=auto_expand):
-            st.write("Boxplots show median, quartiles and outliers per subject — useful for spotting variability and extremes.")
+    # Provide multi-line chart: each SUBJECT is a line across ExamNumber (x)
+    st.subheader("Marks trend across exams (subject lines)")
+    if not marks_df.empty and "ExamNumber" in marks_df.columns and "Subject" in marks_df.columns and "Marks" in marks_df.columns:
+        # optional exam filter inside marks tab
+        exam_inside = st.multiselect("Filter exams to include (leave empty = all)", options=sorted(marks_df["ExamNumber"].dropna().unique().tolist()), default=sorted(marks_df["ExamNumber"].dropna().unique().tolist()))
+        subj_inside = st.multiselect("Subjects to include (leave empty = all)", options=sorted(marks_df["Subject"].dropna().unique().tolist()), default=sorted(marks_df["Subject"].dropna().unique().tolist()))
+        dfm = marks_df.copy()
+        if exam_inside:
+            dfm = dfm[dfm["ExamNumber"].isin(exam_inside)]
+        if subj_inside:
+            dfm = dfm[dfm["Subject"].isin(subj_inside)]
+        # aggregate: mean marks per exam per subject
+        trend = dfm.groupby(["ExamNumber","Subject"])["Marks"].mean().reset_index()
+        if not trend.empty:
+            fig_tr = px.line(trend, x="ExamNumber", y="Marks", color="Subject", markers=True, color_discrete_map=SUBJECT_COLORS, title="Subject-wise trend across exams")
+            st.plotly_chart(fig_tr, use_container_width=True)
+            with st.expander("Explanation", expanded=auto_expand):
+                st.write("Each line is a subject, showing average marks across exams. Use the filters to focus on particular exams or subjects.")
+        else:
+            st.info("No aggregated trend data after filters.")
     else:
-        st.info("Insufficient marks data to show boxplots.")
+        st.info("Not enough marks data (ExamNumber/Subject/Marks) to show trends.")
 
     st.markdown("---")
-    st.subheader("Top & bottom performers (configurable)")
-    if not marks_df.empty and "Name" in marks_df.columns:
-        k = st.slider("How many top/bottom students", min_value=1, max_value=30, value=5)
-        avg_by_name = marks_df.groupby("Name")["Marks"].mean().reset_index().dropna().sort_values("Marks", ascending=False)
-        topk = avg_by_name.head(k)
-        botk = avg_by_name.tail(k).sort_values("Marks")
-        fig_top = px.bar(topk, x="Name", y="Marks", title=f"Top {k} students (avg marks)", color_discrete_sequence=[DISTINCT_PALETTE[2]])
-        fig_bot = px.bar(botk, x="Name", y="Marks", title=f"Bottom {k} students (avg marks)", color_discrete_sequence=[DISTINCT_PALETTE[4]])
-        st.plotly_chart(fig_top, use_container_width=True)
-        st.plotly_chart(fig_bot, use_container_width=True)
-        with st.expander("Explanation", expanded=auto_expand):
-            st.write("Top and bottom performers help you recognize and plan interventions.")
+    # Boxplot by subject (already available elsewhere but keep here)
+    st.subheader("Distribution by subject (boxplot)")
+    if not marks_df.empty and "Marks" in marks_df.columns and "Subject" in marks_df.columns:
+        bdf = marks_df.copy()
+        if subj_inside:
+            bdf = bdf[bdf["Subject"].isin(subj_inside)]
+        fig_b = px.box(bdf, x="Subject", y="Marks", color="Subject", color_discrete_map=SUBJECT_COLORS)
+        st.plotly_chart(fig_b, use_container_width=True)
     else:
-        st.info("No marks data to compute performers.")
+        st.info("No marks data for boxplots.")
 
-# ===== Tab 5: Insights =====
+# ===== Tab: Insights =====
 with tabs[5]:
-    st.header("Insights (auto-generated)")
-    bullets = []
+    st.header("Insights")
 
-    # class-level numeric insights
+    bullets = []
     if not marks_df.empty and "Marks" in marks_df.columns:
         overall_avg = marks_df["Marks"].mean()
-        overall_median = marks_df["Marks"].median()
+        overall_med = marks_df["Marks"].median()
         bullets.append(f"Class average mark: {overall_avg:.1f}")
-        bullets.append(f"Class median mark: {overall_median:.1f}")
-
-        # subject with highest avg
+        bullets.append(f"Class median mark: {overall_med:.1f}")
         subj_avg = marks_df.groupby("Subject")["Marks"].mean().reset_index().dropna()
         if not subj_avg.empty:
-            best_sub = subj_avg.sort_values("Marks", ascending=False).iloc[0]
-            worst_sub = subj_avg.sort_values("Marks", ascending=True).iloc[0]
-            bullets.append(f"Best subject (class avg): {best_sub['Subject']} ({best_sub['Marks']:.1f})")
-            bullets.append(f"Weakest subject (class avg): {worst_sub['Subject']} ({worst_sub['Marks']:.1f})")
-
+            best = subj_avg.sort_values("Marks", ascending=False).iloc[0]
+            worst = subj_avg.sort_values("Marks", ascending=True).iloc[0]
+            bullets.append(f"Best subject: {best['Subject']} ({best['Marks']:.1f})")
+            bullets.append(f"Weakest subject: {worst['Subject']} ({worst['Marks']:.1f})")
     if not att_df.empty and "_present_flag_" in att_df.columns:
-        avg_att_overall = att_df["_present_flag_"].mean()
-        bullets.append(f"Average attendance overall: {avg_att_overall*100:.1f}%")
-
-    # present bullets
+        bullets.append(f"Average attendance overall: {att_df['_present_flag_'].mean()*100:.1f}%")
     if bullets:
         st.subheader("Quick numbers")
         for b in bullets:
             st.write("•", b)
     else:
-        st.info("Not enough data to generate quick insights.")
+        st.info("Not enough data to create quick insights.")
 
     st.markdown("---")
     st.subheader("Who to prioritize (simple rules)")
@@ -585,10 +512,10 @@ with tabs[5]:
             flagged["attendance_pct"] = flagged["att_rate"].apply(lambda x: f"{x*100:.1f}%")
             st.dataframe(flagged[["Name","avg_marks","attendance_pct"]].rename(columns={"avg_marks":"Avg Marks"}).set_index("Name"))
             with st.expander("Explanation", expanded=auto_expand):
-                st.write("Students above are flagged for either low average marks or low attendance — consider interventions.")
+                st.write("These students are flagged for low average marks or low attendance. Prioritize them for follow-ups.")
         else:
             st.success("No students flagged with current thresholds.")
     else:
-        st.info("Need both marks and attendance to identify priority students.")
+        st.info("Need both marks and attendance to flag students.")
 
-st.caption("Right iTech — fixed radar bug, robust gender counts, added avg present/absent capsule. Tell me any single tweak and I will update only that part.")
+st.caption("Right iTech — final updates: subject colors are consistent; marks trends are subject-lines across exams; daily attendance heatmap exists. Tell me one small tweak you'd like next.")
