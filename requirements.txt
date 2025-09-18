@@ -6,3 +6,5 @@ openpyxl>=3.0.0
 seaborn
 statsmodels
 scikit-learn
+reportlab
+kaleido
