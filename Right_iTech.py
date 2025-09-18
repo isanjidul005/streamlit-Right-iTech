@@ -1,5 +1,5 @@
-# Right_iTech_final_polished.py
-# Streamlit app — Right iTech (professional, theme-agnostic, Plotly visuals)
+# Right_iTech_streamlit_fixed.py
+# Full app with pandas-2.x compatible radar fix + gender counts + avg present/absent capsule
 
 import os
 from datetime import date
@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 # Page config
 # -------------------------
 st.set_page_config(page_title="Right iTech", layout="wide", initial_sidebar_state="expanded")
-px.defaults.template = "plotly_white"  # theme-agnostic baseline
+px.defaults.template = "plotly_white"
 
 # -------------------------
 # Professional color palette (distinct colors)
@@ -195,11 +195,25 @@ with tabs[0]:
     total_students = len(ids_set) if ids_set else (marks_df["Name"].nunique() if not marks_df.empty and "Name" in marks_df.columns else 0)
     col1.metric("Total students", total_students)
 
-    # gender counts
+    # robust gender counts
     if not att_df.empty and "Gender" in att_df.columns:
-        gender_counts = att_df.drop_duplicates(subset=["ID"])[["ID","Gender"]].groupby("Gender").size().to_dict()
-        boys = gender_counts.get("M", gender_counts.get("Male", 0))
-        girls = gender_counts.get("F", gender_counts.get("Female", 0))
+        # prefer unique ID if present, else fallback to Name
+        unique_students = att_df.copy()
+        if "ID" in unique_students.columns:
+            unique_students = unique_students.drop_duplicates(subset=["ID"])
+            id_col = "ID"
+        else:
+            unique_students = unique_students.drop_duplicates(subset=["Name"])
+            id_col = "Name"
+        # normalize gender string
+        unique_students["__g__"] = unique_students["Gender"].astype(str).fillna("").str.strip().str.lower()
+        def norm_g(x):
+            if x.startswith("m"): return "male"
+            if x.startswith("f"): return "female"
+            return "other"
+        unique_students["__g_norm__"] = unique_students["__g__"].apply(norm_g)
+        boys = unique_students[unique_students["__g_norm__"]=="male"][id_col].nunique() if id_col in unique_students.columns else 0
+        girls = unique_students[unique_students["__g_norm__"]=="female"][id_col].nunique() if id_col in unique_students.columns else 0
         col2.metric("Boys", int(boys))
         col3.metric("Girls", int(girls))
     else:
@@ -207,6 +221,21 @@ with tabs[0]:
 
     avg_att = att_df["_present_flag_"].mean() if not att_df.empty else np.nan
     col4.metric("Avg attendance", f"{avg_att*100:.1f}%" if not np.isnan(avg_att) else "N/A")
+
+    st.markdown("")  # small spacer
+
+    # Present / Absent capsule (simple capsule-style row of metrics)
+    capsule_col1, capsule_col2, _ = st.columns([1,1,4])
+    avg_present = avg_att
+    avg_absent = (1 - avg_att) if not np.isnan(avg_att) else np.nan
+    capsule_col1.markdown(
+        f"<div style='background:#f1f5f9;padding:10px;border-radius:8px;text-align:center'><div style='color:#0b3d91;font-weight:700'>Avg Present</div><div style='font-size:18px'>{f'{avg_present*100:.1f}%' if not np.isnan(avg_present) else 'N/A'}</div></div>",
+        unsafe_allow_html=True
+    )
+    capsule_col2.markdown(
+        f"<div style='background:#f1f5f9;padding:10px;border-radius:8px;text-align:center'><div style='color:#7f1f1f;font-weight:700'>Avg Absent</div><div style='font-size:18px'>{f'{avg_absent*100:.1f}%' if not np.isnan(avg_absent) else 'N/A'}</div></div>",
+        unsafe_allow_html=True
+    )
 
     st.markdown("---")
 
@@ -324,14 +353,15 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Radar / polar for subject strengths (simple)
+        # Radar / polar for subject strengths (fixed for pandas 2.x)
         st.subheader("Subject strengths (radar)")
         if not s_marks.empty and "Subject" in s_marks.columns:
             subj_avg = s_marks.groupby("Subject")["Marks"].mean().reset_index()
-            subj_avg = subj_avg.sort_values("Marks", ascending=False)
-            # prepare for polar: need closed loop
+            subj_avg = subj_avg.sort_values("Marks", ascending=False).reset_index(drop=True)
             polar_df = subj_avg.copy()
-            polar_df = polar_df.append(polar_df.iloc[0], ignore_index=True) if len(polar_df)>0 else polar_df
+            if len(polar_df) > 0:
+                # concat the first row to the end to close the radar polygon (pandas 2.x compatible)
+                polar_df = pd.concat([polar_df, polar_df.iloc[[0]]], ignore_index=True)
             if not polar_df.empty:
                 fig_polar = go.Figure()
                 fig_polar.add_trace(go.Scatterpolar(
@@ -561,4 +591,4 @@ with tabs[5]:
     else:
         st.info("Need both marks and attendance to identify priority students.")
 
-st.caption("Right iTech — professional, distinct colors, many simple visuals. Tell me any individual plot or color you'd like tweaked and I will update exactly that portion.")
+st.caption("Right iTech — fixed radar bug, robust gender counts, added avg present/absent capsule. Tell me any single tweak and I will update only that part.")
