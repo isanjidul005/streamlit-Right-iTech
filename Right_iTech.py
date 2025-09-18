@@ -620,4 +620,4 @@ with tabs[5]:
     else:
         st.info("Need both marks and attendance data to compute flags.")
 
-st.caption("Right iTech — complete. Tell me one small change you'd like next (color tweak, plot type swap, or small UI adjustment) and I will update that single item only.")
+st.caption("Copyright: Right iTech")
